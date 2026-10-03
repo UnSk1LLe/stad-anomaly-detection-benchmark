@@ -234,8 +234,8 @@ def load_ft_aed(
     clean_buffer: int = 8,
     n_lanes: int = 4,
     fold: int | None = None,
-    n_folds: int = 6,
-    fold_test_days: int = 2,
+    n_folds: int = 4,
+    fold_test_days: int = 3,
     fold_val_days: int = 2,
     fold_min_train_days: int = 6,
 ) -> SplitData:
@@ -272,15 +272,12 @@ def load_ft_aed(
 
         Зачем CV вообще. При одиночном сплите в тесте остаётся 18 событий
         из 63, и recall квантуется шагом 1/18 — различие между моделями
-        тонет в этой зернистости. Шесть фолдов по 2 тестовых дня задействуют
-        12 дней из 20 под тест (раньше четыре по 3 — те же 12 дней, но
-        вдвое меньше блоков) и дают шесть блоков для теста Фридмана вместо
-        четырёх. Дней ровно ``fold_min_train_days + fold_val_days +
-        n_folds * fold_test_days = 6 + 2 + 12 = 20``: запаса нет.
-
-        Число событий на фолд зависит от ``label_source`` и ограничено
-        снизу не кодом, а данными: перед прогоном проверять
-        ``scripts/check_folds.py``.
+        тонет в этой зернистости. Четыре фолда по 3 тестовых дня дают
+        четыре блока для теста Фридмана на сид вместо одного. Шесть
+        фолдов по 2 дня проверены и отвергнуты: при ``label_source=crash``
+        в фолде 0 остаётся 3 события (порог 5, ``scripts/check_folds.py``).
+        Дней ровно ``fold_min_train_days + fold_val_days + n_folds *
+        fold_test_days = 6 + 2 + 12 = 20``: запаса нет.
     """
     root = Path(root)
     path = _find_csv(root)
