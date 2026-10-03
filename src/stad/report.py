@@ -516,3 +516,92 @@ def write_results_md(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(L), encoding="utf-8")
     return out_path
+
+
+# ------------------------------------------------- решающие правила аугментации
+def decide_augmentation(summary: pd.DataFrame, *, metric: str = "padf") -> list[dict[str, str]]:
+    """Применить правила R8–R10 из docs/DECISION_RULES.md к эффекту синтетики.
+
+    Вход — результат :func:`stad.augment.summarise`: парный эффект
+    относительно обучения без синтетики, по энкодерам и источникам.
+    Правила зафиксированы до прогона, здесь только подстановка чисел.
+    """
+    out: list[dict[str, str]] = []
+    if summary.empty:
+        return [{
+            "rule": "R8 — помогает ли синтетика",
+            "finding": "Таблица эффекта пуста: арм аугментации не прогонялся.",
+            "action": "Запустить scripts/run_augmentation.py прежде, чем делать выводы.",
+        }]
+
+    # ---- R8: есть ли эффект вообще
+    best = summary.loc[summary["delta_mean"].idxmax()]
+    sd = float(best["delta_std"]) if np.isfinite(best["delta_std"]) else 0.0
+    significant = best["delta_mean"] > sd and best["delta_mean"] > 0
+    out.append({
+        "rule": "R8 — помогает ли синтетика вообще",
+        "finding": (
+            f"Лучший эффект: {best['encoder']} + {best['source']} при ratio={best['ratio']}, "
+            f"Δ{metric} = {best['delta_mean']:+.4f} ± {sd:.4f} (n={int(best['n'])})."
+        ),
+        "action": (
+            "Аугментация работает — переходить к R9 и выяснять, за счёт чего."
+            if significant else
+            "Эффект не отличим от разброса. ПУБЛИКУЕМЫЙ НЕГАТИВНЫЙ РЕЗУЛЬТАТ для главы 4: "
+            "он объясняет противоречие в литературе (+13% F1 против нуля) — выигрыш зависит "
+            "не от качества генератора, а от того, ограничена ли задача размером редкого класса."
+        ),
+    })
+    if not significant:
+        return out
+
+    # ---- R9: GAN или сам факт расширения
+    by_src = summary.groupby("source", as_index=False)["delta_mean"].mean()
+    d = dict(zip(by_src["source"], by_src["delta_mean"]))
+    if "gan" in d and "lwr" in d:
+        gap = d["gan"] - d["lwr"]
+        pooled = float(summary["delta_std"].mean() or 0.0)
+        if abs(gap) <= pooled:
+            action = (
+                "Помогает РАСШИРЕНИЕ РЕДКОГО КЛАССА КАК ТАКОВОЕ, а не выученное "
+                "распределение. Вклад работы — протокол аугментации и его проверка, "
+                "а не GAN. Качество генератора доказывать не требуется."
+            )
+        elif gap > 0:
+            action = (
+                "GAN даёт дополнительный выигрыш сверх физической инъекции. "
+                "УТВЕРЖДЕНИЕ НЕ ЗАЩИЩАЕТСЯ без второй проверки: нужна кросс-валидация "
+                "на генераторе другого семейства, иначе нельзя исключить, что детектор "
+                "выучил артефакты именно этого WGAN-GP."
+            )
+        else:
+            action = (
+                "Физическая инъекция сильнее обученной. Для диссертации это выгодно: "
+                "детектор без обученного генератора проще, воспроизводимее и структурно "
+                "невосприимчив к циркулярности оценки."
+            )
+        out.append({
+            "rule": "R9 — за счёт чего помогает",
+            "finding": f"Δ{metric}: GAN {d['gan']:+.4f}, физика LWR {d['lwr']:+.4f}, "
+                       f"разница {gap:+.4f} при типичном разбросе {pooled:.4f}.",
+            "action": action,
+        })
+
+    # ---- R10: зависит ли от архитектуры
+    by_enc = summary.groupby("encoder", as_index=False)["delta_mean"].mean()
+    spread = float(by_enc["delta_mean"].max() - by_enc["delta_mean"].min())
+    pooled = float(summary["delta_std"].mean() or 0.0)
+    out.append({
+        "rule": "R10 — зависит ли эффект от архитектуры",
+        "finding": "; ".join(f"{r.encoder}: {r.delta_mean:+.4f}" for r in by_enc.itertuples())
+                   + f" (разброс {spread:.4f}, типичная стд {pooled:.4f})",
+        "action": (
+            "Эффект зависит от архитектуры: «какая лучше на чистых данных» и «какая "
+            "выигрывает от аугментации» — разные вопросы, и в главе 2 архитектура "
+            "выбирается под тот режим, в котором она будет работать."
+            if spread > pooled else
+            "Эффект ортогонален выбору энкодера: аугментацию можно обсуждать в главе 4 "
+            "независимо от главы 2."
+        ),
+    })
+    return out
