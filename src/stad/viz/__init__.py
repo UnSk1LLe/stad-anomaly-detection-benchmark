@@ -1,5 +1,6 @@
 """Визуализации отчёта и единая визуальная система."""
 from .figures import (
+    fig_augmentation_effect,
     fig_critical_difference,
     fig_encoder_head_heatmap,
     fig_event_timeline,
@@ -9,6 +10,7 @@ from .figures import (
     fig_pr_curves,
     fig_seed_variance,
     fig_spatial_prior_contribution,
+    fig_synthetic_fidelity,
 )
 from .theme import CATEGORICAL, CATEGORICAL_SAFE3, GROUP_STYLE, MARKERS, apply_theme, save
 
@@ -17,4 +19,5 @@ __all__ = [
     "fig_critical_difference", "fig_operating_curves", "fig_pr_curves",
     "fig_encoder_head_heatmap", "fig_metric_inflation", "fig_seed_variance",
     "fig_pareto", "fig_event_timeline", "fig_spatial_prior_contribution",
+    "fig_augmentation_effect", "fig_synthetic_fidelity",
 ]

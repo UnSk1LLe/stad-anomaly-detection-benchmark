@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 from ..metrics.stats import mean_ranks, nemenyi_cd, rank_matrix
+from ..encoders import ENCODER_LABELS
 from ..registry import GROUP_LABELS
 from .theme import (
     CATEGORICAL,
@@ -580,3 +581,120 @@ def fig_spatial_prior_contribution(
         "при выровненном бюджете параметров.",
     )
     return save(fig, out_dir, "fig09_spatial_prior", table=agg, tables_dir=tables_dir)
+
+
+# ----------------------------------------------------------------- fig 10
+def fig_augmentation_effect(
+    summary: pd.DataFrame,
+    *,
+    metric: str = "padf",
+    out_dir: Path,
+    tables_dir: Path,
+) -> list[Path]:
+    """Эффект аугментации: Δ метрики против доли синтетики, по энкодерам.
+
+    Малые множества — по панели на энкодер, — а не одна перегруженная
+    фигура: вопрос «зависит ли эффект от архитектуры» читается именно
+    из сравнения панелей между собой. Внутри панели всего две серии
+    (GAN и физическая инъекция), поэтому обе получают прямые подписи, и
+    идентичность не держится на одном цвете.
+
+    Как читать. Нулевая линия — обучение без синтетики. Если обе серии
+    лежат на нуле, синтетика не помогает. Если обе выше и близки друг к
+    другу, помогает сам факт расширения редкого класса, а не выученное
+    распределение. Если выше только GAN — нужно доказывать, что это не
+    запоминание артефактов генератора.
+    """
+    if summary.empty:
+        return []
+    encoders = list(dict.fromkeys(summary["encoder"]))
+    n = len(encoders)
+    fig, axes = plt.subplots(1, n, figsize=(3.9 * n + 1.0, 4.4), sharey=True, squeeze=False)
+    axes = axes[0]
+
+    source_style = {
+        "gan": {"color": CATEGORICAL[0], "marker": "o", "label": "GAN (WGAN-GP)"},
+        "lwr": {"color": CATEGORICAL[1], "marker": "s", "label": "Физика LWR (без обучения)"},
+    }
+
+    for ax, enc in zip(axes, encoders):
+        part = summary[summary["encoder"] == enc]
+        ax.axhline(0.0, color=INK_PRIMARY, lw=1.2)
+        for src, st in source_style.items():
+            s = part[part["source"] == src].sort_values("ratio")
+            if s.empty:
+                continue
+            ax.plot(s["ratio"], s["delta_mean"], marker=st["marker"],
+                    color=st["color"], label=st["label"])
+            sd = s["delta_std"].fillna(0.0).to_numpy()
+            ax.fill_between(s["ratio"], s["delta_mean"] - sd, s["delta_mean"] + sd,
+                            color=st["color"], alpha=0.12, linewidth=0)
+            ax.annotate(st["label"].split(" ")[0],
+                        (s["ratio"].iloc[-1], s["delta_mean"].iloc[-1]),
+                        textcoords="offset points", xytext=(6, 0), fontsize=8,
+                        color=st["color"], va="center")
+        ax.set_title(ENCODER_LABELS.get(enc, enc), fontsize=10)
+        ax.set_xlabel("синтетических окон на одно реальное")
+        ax.grid(axis="x", visible=False)
+
+    axes[0].set_ylabel(f"Δ {metric} относительно обучения без синтетики")
+    axes[0].legend(loc="best", fontsize=8)
+    annotate_source(
+        fig,
+        "Полоса — ±1 стд по фолдам и сидам. Эффект считается парно: к базе того же "
+        "энкодера, фолда и сида, иначе в него попадает разброс инициализации. "
+        "Оценка только на реальных событиях — синтетика в тест не попадает.",
+    )
+    return save(fig, out_dir, "fig10_augmentation_effect", table=summary, tables_dir=tables_dir)
+
+
+# ----------------------------------------------------------------- fig 11
+def fig_synthetic_fidelity(
+    real_delta: np.ndarray,
+    gan_delta: np.ndarray,
+    lwr_delta: np.ndarray,
+    feature_names: list[str],
+    *,
+    out_dir: Path,
+    tables_dir: Path,
+) -> list[Path]:
+    """Похожа ли синтетика на реальные аномалии по знаку и порядку величины.
+
+    Это не метрика качества генерации, а **санитарная проверка**: если
+    синтетическое возмущение не совпадает с реальным даже по знаку, то
+    любой вывод об эффекте аугментации преждевременен. Сравниваются
+    распределения остатка по каждому признаку в единицах sigma.
+    """
+    F = len(feature_names)
+    fig, axes = plt.subplots(1, F, figsize=(3.4 * F + 0.8, 4.0), squeeze=False)
+    axes = axes[0]
+    series = {
+        "реальные": (real_delta, CATEGORICAL[2]),
+        "GAN": (gan_delta, CATEGORICAL[0]),
+        "физика LWR": (lwr_delta, CATEGORICAL[1]),
+    }
+    rows = []
+    for f, (ax, name) in enumerate(zip(axes, feature_names)):
+        data = [np.asarray(d)[..., f].ravel() for d, _ in series.values()]
+        parts = ax.boxplot(data, tick_labels=list(series), showfliers=False,
+                           widths=0.55, patch_artist=True, medianprops={"color": INK_PRIMARY})
+        for patch, (_, color) in zip(parts["boxes"], series.values()):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.55)
+            patch.set_edgecolor(color)
+        ax.axhline(0.0, color=INK_MUTED, lw=1.0, ls="--")
+        ax.set_title(name, fontsize=10)
+        ax.grid(axis="x", visible=False)
+        for label, (d, _) in series.items():
+            v = np.asarray(d)[..., f].ravel()
+            rows.append({"feature": name, "source": label,
+                         "mean": float(v.mean()), "std": float(v.std()),
+                         "median": float(np.median(v))})
+    axes[0].set_ylabel("остаток относительно нормы, sigma")
+    annotate_source(
+        fig,
+        "Санитарная проверка, а не метрика качества генерации: совпадают ли знак и "
+        "порядок величины возмущения. Пунктир — отсутствие возмущения.",
+    )
+    return save(fig, out_dir, "fig11_synthetic_fidelity",
+                table=pd.DataFrame(rows), tables_dir=tables_dir)
