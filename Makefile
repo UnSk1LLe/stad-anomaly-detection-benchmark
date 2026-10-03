@@ -1,4 +1,4 @@
-.PHONY: help setup test smoke synthetic ft-aed ft-aed-extended figures clean lint
+.PHONY: help setup test smoke synthetic ft-aed ft-aed-cv ft-aed-extended augmentation figures clean lint data
 
 PY ?= python
 PIP ?= pip
@@ -18,8 +18,14 @@ smoke:         ## быстрая проверка пайплайна на син
 synthetic:     ## полная сетка на синтетике: объяснение механизма
 	$(PY) scripts/run_benchmark.py --config configs/synthetic_full.yaml
 
-ft-aed:        ## ИТОГОВЫЙ прогон для диссертации: 12 конфигураций на FT-AED
+ft-aed:        ## прогон на FT-AED, одиночный holdout (18 событий в тесте)
 	$(PY) scripts/run_benchmark.py --config configs/ft_aed_core.yaml
+
+ft-aed-cv:     ## ИТОГОВЫЙ прогон: rolling-origin CV по дням, 44 события
+	$(PY) scripts/run_benchmark.py --config configs/ft_aed_cv.yaml
+
+augmentation:  ## эффект GAN-аугментации редких аномалий (главы 4 и 6)
+	$(PY) scripts/run_augmentation.py --folds 0 1 2 3
 
 ft-aed-extended: ## полный крест энкодер × голова на FT-AED (дорого)
 	$(PY) scripts/run_benchmark.py --config configs/ft_aed_extended.yaml
