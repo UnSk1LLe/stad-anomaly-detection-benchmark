@@ -340,6 +340,19 @@ def load_ft_aed(
     y_nodes = np.repeat(y[:, None], N, axis=1)
     eid_nodes = np.repeat(eid[:, None], N, axis=1)
 
+    # События ДРУГОГО типа (при label_source="crash" — человеческие отметки, и
+    # наоборот) оцениваться не будут, но это реальные аномалии. Считать их нормой
+    # нельзя: протокол требует убрать из train и val окна ВСЕХ известных событий
+    # (docs/PROTOCOL.md §6). Иначе они загрязняют модель нормы и задирают порог,
+    # калиброванный на валидации (измерено: весь верхний 1% score валидации стоял
+    # в пределах часа от человеческой отметки, recall обнулялся).
+    other_labels = {"crash": human, "human": crash, "both": np.zeros_like(crash)}[label_source]
+    y_other = np.zeros(n_win, dtype=np.int64)
+    other_events = _build_events(other_labels, times, merge_gap_min, step_min)
+    for ev in other_events.itertuples():
+        y_other[(t_end >= ev.t_report - lead_min) & (t_end <= ev.t_report + trail_min)] = 1
+    y_clean_nodes = np.repeat((y | y_other)[:, None], N, axis=1)   # только для очистки train/val
+
     # ------------------------------------------------- сплит по дням
     days_sorted = np.unique(day)
     if fold is None:
@@ -370,8 +383,8 @@ def load_ft_aed(
     m_va = np.isin(win_day, list(d_va))
     m_te = np.isin(win_day, list(d_te))
 
-    keep_tr = np.where(m_tr)[0][drop_anomalous_windows(X[m_tr], y_nodes[m_tr], buffer=clean_buffer)]
-    keep_va = np.where(m_va)[0][drop_anomalous_windows(X[m_va], y_nodes[m_va], buffer=clean_buffer)]
+    keep_tr = np.where(m_tr)[0][drop_anomalous_windows(X[m_tr], y_clean_nodes[m_tr], buffer=clean_buffer)]
+    keep_va = np.where(m_va)[0][drop_anomalous_windows(X[m_va], y_clean_nodes[m_va], buffer=clean_buffer)]
     idx_te = np.where(m_te)[0]
     if len(keep_tr) < 64:
         raise ValueError(f"в train осталось {len(keep_tr)} окон — уменьшите clean_buffer")
@@ -425,6 +438,7 @@ def load_ft_aed(
             "n_val_windows": int(len(keep_va)),
             "n_test_windows": int(len(idx_te)),
             "dropped_train_windows": int(m_tr.sum() - len(keep_tr)),
+            "n_other_events_excluded": int(len(other_events)),
             "n_train_anomalous": int(len(anom_tr)),
             "n_val_anomalous": int(len(anom_va)),
             "labels_are_corridor_level": True,
