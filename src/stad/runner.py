@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -40,7 +41,7 @@ from .metrics import (
 )
 from .model import build_detector
 from .registry import Config, GROUP_LABELS
-from .train import TrainConfig, train_detector
+from .train import TrainConfig, format_duration, train_detector
 
 
 def _git_sha() -> str:
@@ -66,6 +67,32 @@ def environment_stamp() -> dict[str, str]:
         "cuda": torch.version.cuda or "cpu",
         "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
+
+
+def estimate_remaining(
+    remaining: list[Config],
+    durations: dict[str, float],
+    trainable: dict[str, bool],
+) -> float:
+    """Оценка оставшихся секунд по средним временам уже выполненных клеток.
+
+    Время клетки берётся как среднее по той же конфигурации; для конфигурации,
+    которой ещё не было, — среднее по клеткам того же рода (обучаемые отдельно
+    от небучаемых), иначе дешёвые бейзлайны занижали бы оценку. Данные
+    поздних фолдов больше, чем ранних, поэтому оценка слегка оптимистична.
+    """
+    by_name: dict[str, list[float]] = {}
+    for name, sec in durations.items():
+        by_name.setdefault(name, []).append(sec)
+    kind: dict[bool, list[float]] = {True: [], False: []}
+    for name, secs in by_name.items():
+        kind[trainable[name]].extend(secs)
+    total = 0.0
+    for cfg in remaining:
+        own = by_name.get(cfg.name)
+        pool = own or kind[cfg.is_trainable]
+        total += sum(pool) / len(pool) if pool else 0.0
+    return total
 
 
 def run_config(
@@ -219,6 +246,20 @@ def run_config(
     return row, curve, scores, budget_row, val_scores
 
 
+def _eta_text(t_grid: float, remaining: list[Config], cells: list[tuple[str, float]],
+              trainable: dict[str, bool]) -> str:
+    elapsed = time.perf_counter() - t_grid
+    if not remaining:
+        return f"[прошло {format_duration(elapsed)}]"
+    # среднее по клеткам одной конфигурации: для оценки хватает последних значений
+    by_cfg: dict[str, list[float]] = {}
+    for n, sec in cells:
+        by_cfg.setdefault(n, []).append(sec)
+    avg = {n: sum(v) / len(v) for n, v in by_cfg.items()}
+    eta = estimate_remaining(remaining, avg, trainable)
+    return f"[прошло {format_duration(elapsed)}, осталось ≈{format_duration(eta)}]"
+
+
 def run_grid(
     configs: tuple[Config, ...],
     datasets: dict[str, SplitData],
@@ -253,11 +294,18 @@ def run_grid(
 
     total = len(datasets) * len(seeds) * len(configs)
     done = 0
+    plan = [cfg for _ in datasets for _ in seeds for cfg in configs]
+    trainable = {c.name: c.is_trainable for c in configs}
+    cell_seconds: list[tuple[str, float]] = []      # (конфигурация, секунд)
+    t_grid = time.perf_counter()
     for ds_name, data in datasets.items():
         for seed in seeds:
             for cfg in configs:
                 done += 1
                 tag = f"[{done}/{total}] {ds_name} seed={seed} {cfg.name}"
+                if verbose and cfg.is_trainable:
+                    print(f"{tag}  обучение…", flush=True)
+                t_cell = time.perf_counter()
                 try:
                     row, curve, scores, budget, val_scores = run_config(
                         cfg, data, seed=seed, dataset_name=ds_name,
@@ -277,10 +325,13 @@ def run_grid(
                         np.save(out_dir / "scores" / f"{cfg.name}__{ds_name}__seed{seed}__val.npy",
                                 val_scores)
                     if verbose:
+                        cell_seconds.append((cfg.name, time.perf_counter() - t_cell))
                         print(
                             f"{tag}  recall={row['event_recall']:.3f} "
                             f"delay={row['median_delay_min']:+.1f}м padf={row['padf']:.3f} "
-                            f"AP={row['average_precision']:.4f}"
+                            f"AP={row['average_precision']:.4f}  "
+                            f"{_eta_text(t_grid, plan[done:], cell_seconds, trainable)}",
+                            flush=True,
                         )
                 except Exception as exc:  # прогон одной клетки не должен ронять сетку
                     failures.append({"config": cfg.name, "dataset": ds_name, "seed": seed,

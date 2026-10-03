@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -41,6 +42,7 @@ class TrainConfig:
     device: str = "auto"
     num_workers: int = 0
     log_every: int = 0        # 0 = молча
+    progress: bool = False    # полоса прогресса по эпохам с оценкой оставшегося времени
 
     def resolve_device(self) -> torch.device:
         if self.device != "auto":
@@ -76,6 +78,65 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def format_duration(seconds: float) -> str:
+    """``95 -> '1м35с'``, ``3700 -> '1ч01м'``."""
+    s = max(0, int(round(seconds)))
+    if s >= 3600:
+        return f"{s // 3600}ч{(s % 3600) // 60:02d}м"
+    if s >= 60:
+        return f"{s // 60}м{s % 60:02d}с"
+    return f"{s}с"
+
+
+def progress_line(
+    epoch: int, total: int, train_loss: float, val_loss: float, elapsed: float,
+    *, stale: int = 0, patience: int = 0, width: int = 20,
+) -> str:
+    """Строка прогресса после эпохи ``epoch`` (с нуля).
+
+    Оставшееся время — оценка сверху: ранняя остановка может прервать
+    обучение раньше, но заранее неизвестно когда, поэтому считается до ``epochs``.
+    """
+    done = epoch + 1
+    filled = int(width * done / max(1, total))
+    per_epoch = elapsed / done
+    eta = per_epoch * (total - done)
+    stop = f"  ранняя остановка {stale}/{patience}" if patience and stale else ""
+    return (
+        f"  [{'#' * filled}{'-' * (width - filled)}] эпоха {done}/{total}  "
+        f"train {train_loss:.4f}  val {val_loss:.4f}  {per_epoch:.1f}с/эп  "
+        f"ост. ≤{format_duration(eta)}{stop}"
+    )
+
+
+class _EpochProgress:
+    """В терминале — одна перезаписываемая строка; в файле лога — редкие строки."""
+
+    def __init__(self, enabled: bool, total: int) -> None:
+        self.enabled = enabled
+        self.tty = enabled and sys.stdout.isatty()
+        self.every = max(1, total // 8)
+        self.total = total
+        self._width = 0
+
+    def update(self, epoch: int, line: str) -> None:
+        if not self.enabled:
+            return
+        if self.tty:
+            self._width = max(self._width, len(line))
+            print("\r" + line.ljust(self._width), end="", flush=True)
+        elif (epoch + 1) % self.every == 0 or epoch + 1 == self.total:
+            print(line, flush=True)
+
+    def close(self, epochs_run: int, stopped_early: bool) -> None:
+        if not self.enabled:
+            return
+        if self.tty:
+            print("\r" + " " * self._width + "\r", end="", flush=True)
+        if stopped_early:
+            print(f"  ранняя остановка на эпохе {epochs_run}/{self.total}", flush=True)
 
 
 def _loader(X: np.ndarray, batch_size: int, *, shuffle: bool, workers: int = 0) -> DataLoader:
@@ -144,6 +205,7 @@ def train_detector(
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, cfg.epochs))
 
         stale = 0
+        bar = _EpochProgress(cfg.progress, cfg.epochs)
         for epoch in range(cfg.epochs):
             detector.train()
             running = 0.0
@@ -179,14 +241,20 @@ def train_detector(
                 print(f"  epoch {epoch:3d}  train {history[-1]['train_loss']:.5f}  val {val:.5f}")
 
             # ранняя остановка по валидации на нормальных окнах, не по тесту
-            if np.isfinite(val) and val < best_val - 1e-6:
+            improved = bool(np.isfinite(val) and val < best_val - 1e-6)
+            if improved:
                 best_val = val
                 best_state = {k: v.detach().clone() for k, v in detector.state_dict().items()}
                 stale = 0
             else:
                 stale += 1
-                if stale >= cfg.patience:
-                    break
+            bar.update(epoch, progress_line(
+                epoch, cfg.epochs, history[-1]["train_loss"], val, time.perf_counter() - t0,
+                stale=stale, patience=cfg.patience,
+            ))
+            if not improved and stale >= cfg.patience:
+                break
+        bar.close(epochs_run, stopped_early=epochs_run < cfg.epochs)
 
         if best_state is not None:
             detector.load_state_dict(best_state)

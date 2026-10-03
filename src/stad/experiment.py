@@ -309,9 +309,11 @@ def run_experiment(cfg: ExperimentConfig, *, verbose: bool = True) -> dict:
     configs = get_grid(cfg.grid)
     if verbose:
         print(f"[2/4] Прогон сетки «{cfg.grid}»: {len(configs)} конфигураций × {len(cfg.seeds)} сидов")
+    train_cfg = cfg.train_config()
+    train_cfg.progress = verbose or train_cfg.progress
     artifacts = run_grid(
         configs, datasets,
-        seeds=cfg.seeds, train_cfg=cfg.train_config(), param_budget=cfg.param_budget,
+        seeds=cfg.seeds, train_cfg=train_cfg, param_budget=cfg.param_budget,
         out_dir=out, alarm_budget_per_hour=cfg.alarm_budget_per_hour,
         half_life_min=cfg.half_life_min,
         persistence=cfg.persistence, node_reduce=cfg.node_reduce,
