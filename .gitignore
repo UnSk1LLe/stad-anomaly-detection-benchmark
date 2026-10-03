@@ -22,7 +22,9 @@ reports/figures/*.pdf
 !reports/*/manifest.json
 !reports/*/tables/*.csv
 
-# чекпойнты
+# Чекпойнты: тяжёлые и воспроизводятся из кода, но НА ДИСКЕ нужны —
+# прогон стоит часы. Лежат в reports/<прогон>/checkpoints/.
+reports/*/checkpoints/
 *.pt
 *.pth
 *.ckpt

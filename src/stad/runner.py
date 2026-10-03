@@ -25,6 +25,7 @@ import pandas as pd
 
 from .baselines import build_baseline
 from .budget import match_budget
+from .checkpoints import checkpoint_path, save_detector
 from .data.types import SplitData
 from .encoders import ENCODER_LABELS
 from .heads import HEAD_LABELS, HEAD_MECHANISM
@@ -70,6 +71,7 @@ def run_config(
     alarm_budget_per_hour: float = 1.0,
     half_life_min: float = 15.0,
     persistence: int = 3,
+    checkpoint_dir: str | Path | None = None,
 ) -> tuple[dict, pd.DataFrame, np.ndarray, dict | None]:
     """Выполнить одну конфигурацию. Возвращает ``(метрики, кривая, score, бюджет)``."""
     budget_row: dict | None = None
@@ -107,6 +109,27 @@ def run_config(
             detector, data, train_cfg, seed=seed, randomize_only=cfg.randomize_only
         )
         scores = outcome.scores
+
+        # веса сохраняются вместе с рецептом сборки: hidden подбирается на
+        # лету под бюджет параметров, и без рецепта чекпойнт не восстановить
+        if checkpoint_dir is not None and not cfg.randomize_only:
+            save_detector(
+                detector,
+                checkpoint_path(checkpoint_dir, cfg.name, dataset_name, seed),
+                encoder=cfg.encoder, head=cfg.head, hidden=br.hidden,
+                n_features=data.n_features, n_nodes=data.n_nodes, window=data.window,
+                encoder_kwargs=enc_kwargs, head_kwargs=head_kwargs,
+                adjacency=data.A,
+                scaler_mean=data.meta.get("scaler_mean"),
+                scaler_std=data.meta.get("scaler_std"),
+                extra={
+                    "config": cfg.name, "dataset": dataset_name, "seed": seed,
+                    "epochs_run": outcome.epochs_run,
+                    "best_val_loss": outcome.best_val_loss,
+                    "step_min": data.meta.get("step_min"),
+                    "label_source": data.meta.get("label_source"),
+                },
+            )
         runtime = {
             "n_params": outcome.n_params,
             "hidden": br.hidden,
@@ -189,6 +212,7 @@ def run_grid(
     alarm_budget_per_hour: float = 1.0,
     half_life_min: float = 15.0,
     persistence: int = 3,
+    save_checkpoints: bool = True,
     save_scores: bool = True,
     verbose: bool = True,
 ) -> dict[str, pd.DataFrame]:
@@ -221,6 +245,7 @@ def run_grid(
                         train_cfg=train_cfg, param_budget=param_budget,
                         alarm_budget_per_hour=alarm_budget_per_hour,
                         half_life_min=half_life_min, persistence=persistence,
+                        checkpoint_dir=out_dir if save_checkpoints else None,
                     )
                     rows.append(row)
                     curves.append(curve)
@@ -261,6 +286,7 @@ def run_grid(
         "alarm_budget_per_hour": alarm_budget_per_hour,
         "half_life_min": half_life_min,
         "persistence": persistence,
+        "save_checkpoints": save_checkpoints,
         "train_config": asdict(train_cfg),
         "datasets": {k: v.meta for k, v in datasets.items()},
         "prevalence": {k: v.prevalence for k, v in datasets.items()},

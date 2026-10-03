@@ -148,3 +148,48 @@ def test_budget_matched_configs_are_comparable():
         targets[enc] = br.n_params
     a, b = targets.values()
     assert abs(a - b) / max(a, b) < 0.45, f"бюджеты несопоставимы: {targets}"
+
+
+# ------------------------------------------------------------- чекпойнты
+def test_checkpoint_roundtrip_preserves_scores(tmp_path):
+    """Загруженная модель обязана давать те же score, что сохранённая.
+
+    Это главное свойство чекпойнта. Рецепт сборки (hidden подбирается
+    под бюджет параметров), матрица смежности и веса должны
+    восстанавливаться вместе: подстановка другого графа тихо изменила бы
+    поведение модели, обученной под конкретную структуру.
+    """
+    import numpy as np
+
+    from stad.checkpoints import describe, load_detector, save_detector
+
+    A = np.eye(N, dtype=np.float32)
+    det = build_detector("gat_lstm", "flow", hidden=H, n_features=F, n_nodes=N, window=T)
+    det.set_graph(torch.from_numpy(A))
+    det.eval()
+    x = torch.randn(2, N, T, F)
+    before = det.score(x)
+
+    path = tmp_path / "ckpt.pt"
+    save_detector(det, path, encoder="gat_lstm", head="flow", hidden=H,
+                  n_features=F, n_nodes=N, window=T, adjacency=A,
+                  extra={"config": "test", "seed": 0})
+
+    restored, meta = load_detector(path)
+    after = restored.score(x)
+
+    assert torch.allclose(before, after, atol=1e-6), "score после загрузки изменился"
+    assert meta["recipe"]["encoder"] == "gat_lstm"
+    assert meta["recipe"]["hidden"] == H
+    assert meta["extra"]["config"] == "test"
+    assert describe(path)["n_params"] == det.n_params
+
+
+def test_checkpoint_rejects_wrong_format_version(tmp_path):
+    """Чекпойнт чужой версии должен падать явно, а не собирать мусор."""
+    from stad.checkpoints import load_detector
+
+    path = tmp_path / "old.pt"
+    torch.save({"format_version": 0, "state_dict": {}, "recipe": {}}, path)
+    with pytest.raises(ValueError, match="версия формата"):
+        load_detector(path)

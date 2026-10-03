@@ -52,6 +52,10 @@ class ExperimentConfig:
     # сколько подряд идущих окон подтверждают тревогу (логика California)
     persistence: int = 3
     primary_metric: str = "padf"
+    # Сохранять обученные веса. По умолчанию ДА: прогон стоит часы, а
+    # чекпойнт нужен, чтобы посмотреть выученное, прогнать модель на
+    # новых днях и подключить детектор к контуру устранения.
+    save_checkpoints: bool = True
     out_dir: str = "reports"
     datasets: dict[str, dict] = field(default_factory=lambda: {
         "synthetic": {"loader": "synthetic", "kwargs": {}}
@@ -296,7 +300,8 @@ def run_experiment(cfg: ExperimentConfig, *, verbose: bool = True) -> dict:
         seeds=cfg.seeds, train_cfg=cfg.train_config(), param_budget=cfg.param_budget,
         out_dir=out, alarm_budget_per_hour=cfg.alarm_budget_per_hour,
         half_life_min=cfg.half_life_min,
-        persistence=cfg.persistence, verbose=verbose,
+        persistence=cfg.persistence, save_checkpoints=cfg.save_checkpoints,
+        verbose=verbose,
     )
     runs, curves = artifacts["runs"], artifacts["curves"]
     if runs.empty:
