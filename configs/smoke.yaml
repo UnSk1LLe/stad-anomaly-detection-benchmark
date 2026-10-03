@@ -1,0 +1,38 @@
+# Быстрая проверка пайплайна: минуты на CPU.
+# Назначение — убедиться, что всё собирается и метрики ведут себя как
+# предсказывает теория (случайный контроль у пола, обучение даёт прирост).
+# Для выводов о диссертации НЕ ГОДИТСЯ: мало сидов, синтетика, мало эпох.
+name: smoke
+grid: smoke
+seeds: [0, 1]
+param_budget: 60000
+# Рабочая точка: подтверждённых ложных тревог в час на ВСЮ сеть.
+# Операционная единица вместо процента FPR: бюджет внимания диспетчера
+# конечен, а поточечный FPR на сети из сотен узлов вырождается —
+# при FPR 1% случайный score обнаруживает почти любое событие.
+alarm_budget_per_hour: 1.0
+
+half_life_min: 15.0
+primary_metric: padf
+persistence: 3
+out_dir: reports/smoke
+
+datasets:
+  synthetic:
+    loader: synthetic
+    kwargs:
+      stations: 10
+      lanes: 3
+      days: 8
+      step_min: 1.0
+      n_events: 40
+      amplitude: 0.6
+      window: 12
+      seed: 0
+
+train:
+  epochs: 6
+  batch_size: 32
+  lr: 0.002
+  patience: 3
+  device: auto

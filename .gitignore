@@ -1,0 +1,51 @@
+# данные не версионируются: лицензия и размер
+data/
+!data/.gitkeep
+
+# результаты прогонов: тяжёлые score и фигуры пересоздаются из кода
+reports/*/scores/
+reports/*/figures/*.png
+reports/*/figures/*.pdf
+reports/scores/
+reports/figures/*.png
+reports/figures/*.pdf
+
+# НО итоговые таблицы и отчёты версионируются — это артефакт исследования
+!reports/*/RESULTS.md
+!reports/*/runs.csv
+!reports/*/curves.csv
+!reports/*/budget.csv
+!reports/*/manifest.json
+!reports/*/tables/*.csv
+
+# чекпойнты
+*.pt
+*.pth
+*.ckpt
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# инструменты
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# редакторы и ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
