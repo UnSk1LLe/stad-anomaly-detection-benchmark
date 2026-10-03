@@ -110,6 +110,55 @@ def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
             )
         )
 
+    # --- случайный контроль не должен обходить обученные модели ---
+    # Порог «padf у пола» необходим, но недостаточен: контроль может быть
+    # ниже абсолютного порога и при этом выше половины таблицы. Именно это
+    # произошло на первом CV-прогоне FT-AED, и поймала это только проверка
+    # относительного положения.
+    if "ctrl_random" in agg.index:
+        trained = agg.drop(index=[i for i in ("ctrl_random", "ctrl_untrained") if i in agg.index])
+        if not trained.empty:
+            beaten = trained[trained["padf"] < agg.loc["ctrl_random", "padf"]]
+            checks.append(
+                Check(
+                    "Случайный контроль не обходит обученные модели",
+                    len(beaten) <= len(trained) * 0.25,
+                    f"случайный padf={agg.loc['ctrl_random', 'padf']:.3f} выше, чем у "
+                    f"{len(beaten)} из {len(trained)} остальных конфигураций"
+                    + (f": {', '.join(beaten.index[:5])}" if len(beaten) else ""),
+                )
+            )
+
+    # --- мощность: способен ли дизайн вообще обнаружить различие ---
+    # Критическая разница Nemenyi растёт как sqrt(k(k+1)/6N). При малом
+    # числе блоков N и большом числе методов k она может превысить весь
+    # размах средних рангов — тогда тест не может отвергнуть равенство
+    # ни при каких данных, и «различий не обнаружено» означает
+    # «эксперимент недостаточно мощный», а не «методы одинаковы».
+    pivot = runs.pivot_table(index="block", columns="config", values="padf", aggfunc="mean")
+    pivot = pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
+    if pivot.shape[1] >= 3 and pivot.shape[0] >= 2:
+        ranks = mean_ranks(pivot)
+        spread = float(ranks.max() - ranks.min())
+        cd = nemenyi_cd(pivot.shape[1], pivot.shape[0])
+        need = int(np.ceil(pivot.shape[1] * (pivot.shape[1] + 1) / 6
+                           * (3.268 / max(spread, 1e-9)) ** 2))
+        checks.append(
+            Check(
+                "Мощность: критическая разница меньше размаха рангов",
+                spread > cd,
+                f"размах средних рангов {spread:.2f}, CD={cd:.2f} при {pivot.shape[0]} блоках "
+                f"и {pivot.shape[1]} методах. "
+                + (
+                    "Дизайн способен обнаружить различие."
+                    if spread > cd else
+                    f"CD превышает весь размах — тест не может отвергнуть равенство НИ ПРИ КАКИХ "
+                    f"данных. Нужно около {need} блоков (сид × фолд) при текущем числе методов, "
+                    f"либо меньше методов в одном сравнении."
+                ),
+            )
+        )
+
     if "budget_within_tolerance" in runs.columns:
         bad = runs.loc[runs["budget_within_tolerance"] == False, "config"].unique()  # noqa: E712
         checks.append(
@@ -206,6 +255,29 @@ def decide(
     agg = runs.groupby("config")[metric].mean()
     cmp = compare_to_reference(runs, metric=metric, reference=reference)
     verdict = dict(zip(cmp.get("config", []), cmp.get("verdict", []))) if not cmp.empty else {}
+
+    # мощность гейтит все правила: при CD больше размаха «различий нет»
+    # означает «эксперимент не мог их увидеть», а не «методы равны»
+    pivot = runs.pivot_table(index="block", columns="config", values=metric, aggfunc="mean")
+    pivot = pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
+    underpowered = False
+    if pivot.shape[1] >= 3 and pivot.shape[0] >= 2:
+        rk = mean_ranks(pivot)
+        underpowered = float(rk.max() - rk.min()) <= nemenyi_cd(pivot.shape[1], pivot.shape[0])
+    if underpowered:
+        out.append({
+            "rule": "R0 — мощность эксперимента",
+            "finding": (
+                f"Блоков {pivot.shape[0]}, методов {pivot.shape[1]}: критическая разница "
+                f"превышает размах средних рангов."
+            ),
+            "action": (
+                "ВСЕ ВЫВОДЫ НИЖЕ УСЛОВНЫ. При таком числе блоков тест не способен отвергнуть "
+                "равенство методов ни при каких данных, поэтому «неразличимо» здесь означает "
+                "«эксперимент не мог увидеть различие», а не «методы одинаковы». "
+                "Прежде чем переносить что-либо в диссертацию, увеличить число сидов."
+            ),
+        })
 
     # ---- R1: превосходит ли глубина линейную границу
     if "base_pca" in agg.index and reference in agg.index:
