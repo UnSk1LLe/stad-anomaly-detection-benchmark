@@ -64,6 +64,8 @@ class TrainOutcome:
     n_params: int
     history: list[dict[str, float]] = field(default_factory=list)
     extras: dict[str, float] = field(default_factory=dict)
+    #: score на валидационных окнах — для калибровки порога (метки не нужны).
+    val_scores: np.ndarray | None = None
 
 
 def set_seed(seed: int) -> None:
@@ -79,6 +81,25 @@ def set_seed(seed: int) -> None:
 def _loader(X: np.ndarray, batch_size: int, *, shuffle: bool, workers: int = 0) -> DataLoader:
     ds = TensorDataset(torch.from_numpy(np.ascontiguousarray(X)))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=workers, drop_last=False)
+
+
+def _score_windows(
+    detector: Detector, X: np.ndarray, cfg: TrainConfig, device: torch.device
+) -> tuple[np.ndarray, float]:
+    """Score окон батчами: ``(score [n, N], секунд)``. Нечисловые значения заменяются явно."""
+    dl = _loader(X, cfg.batch_size, shuffle=False, workers=cfg.num_workers)
+    chunks: list[np.ndarray] = []
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        for (xb,) in dl:
+            chunks.append(detector.score(xb.to(device)).float().cpu().numpy())
+    seconds = time.perf_counter() - t0
+    scores = np.concatenate(chunks, axis=0).astype(np.float32)
+    if not np.isfinite(scores).all():
+        n_bad = int((~np.isfinite(scores)).sum())
+        scores = np.nan_to_num(scores, nan=0.0, posinf=np.nanmax(scores[np.isfinite(scores)], initial=0.0))
+        print(f"  ВНИМАНИЕ: {n_bad} нечисловых значений в score заменены")
+    return scores, seconds
 
 
 def train_detector(
@@ -174,21 +195,13 @@ def train_detector(
 
     # ------------------------------------------------------------- скоринг
     detector.eval()
-    test_dl = _loader(data.X_test, cfg.batch_size, shuffle=False, workers=cfg.num_workers)
-    chunks: list[np.ndarray] = []
-    t_inf = time.perf_counter()
-    with torch.no_grad():
-        for (xb,) in test_dl:
-            chunks.append(detector.score(xb.to(device)).float().cpu().numpy())
-    inference_s = time.perf_counter() - t_inf
-    scores = np.concatenate(chunks, axis=0).astype(np.float32)
-
+    scores, inference_s = _score_windows(detector, data.X_test, cfg, device)
     if scores.shape != data.y_test.shape:
         raise RuntimeError(f"score {scores.shape} != y_test {data.y_test.shape}")
-    if not np.isfinite(scores).all():
-        n_bad = int((~np.isfinite(scores)).sum())
-        scores = np.nan_to_num(scores, nan=0.0, posinf=np.nanmax(scores[np.isfinite(scores)], initial=0.0))
-        print(f"  ВНИМАНИЕ: {n_bad} нечисловых значений в score заменены")
+
+    # валидация скорится тем же детектором: по ней калибруется порог. Меток она
+    # не несёт (аномальных окон в ней по построению нет), тест порогу не нужен.
+    val_scores, _ = _score_windows(detector, data.X_val, cfg, device)
 
     extras: dict[str, float] = {}
     if hasattr(detector.head, "correction_share"):
@@ -208,4 +221,5 @@ def train_detector(
         n_params=detector.n_params,
         history=history,
         extras=extras,
+        val_scores=val_scores,
     )

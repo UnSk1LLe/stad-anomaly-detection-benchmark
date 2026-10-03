@@ -32,6 +32,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 
@@ -49,7 +51,35 @@ import pandas as pd
 DEFAULT_PERSISTENCE: int = 3
 
 
-def confirm_alarms(fired: np.ndarray, persistence: int = DEFAULT_PERSISTENCE) -> np.ndarray:
+def window_spacing(t: np.ndarray) -> float:
+    """Типичный шаг между соседними окнами, минуты (медиана положительных разностей)."""
+    d = np.diff(np.asarray(t, dtype=float))
+    d = d[d > 0]
+    return float(np.median(d)) if d.size else 1.0
+
+
+def contiguous_segments(t: np.ndarray, spacing: float | None = None) -> np.ndarray:
+    """Номера непрерывных участков по времени окон: ``[n]`` целых.
+
+    Окна соседние в массиве, но не во времени, если между ними вырезан
+    кусок (очистка вокруг событий) или лежит ночной разрыв между днями.
+    Подтверждение «три окна подряд» через такой разрыв склеило бы два
+    не связанных друг с другом отрезка, поэтому там сегмент обрывается.
+    """
+    t = np.asarray(t, dtype=float)
+    if t.size == 0:
+        return np.zeros(0, dtype=np.int64)
+    sp = float(spacing) if spacing else window_spacing(t)
+    brk = np.diff(t) > 1.5 * sp
+    return np.concatenate([[0], np.cumsum(brk)]).astype(np.int64)
+
+
+def confirm_alarms(
+    fired: np.ndarray,
+    persistence: int = DEFAULT_PERSISTENCE,
+    *,
+    segments: np.ndarray | None = None,
+) -> np.ndarray:
     """Оставить только тревоги, подтверждённые ``persistence`` окнами подряд.
 
     ``fired``: ``[n_windows, N]``, окна идут последовательно по времени.
@@ -57,6 +87,11 @@ def confirm_alarms(fired: np.ndarray, persistence: int = DEFAULT_PERSISTENCE) ->
     непрерывная серия превышений длиной не менее ``persistence``,
     причём отмечается **конец** серии — момент, когда тревога
     подтверждена и может быть выдана оператору.
+
+    ``segments`` (``[n_windows]``, см. :func:`contiguous_segments`): серия
+    не может пересекать границу сегмента. Без него окна считаются
+    сплошными — верно для теста внутри одного дня, неверно для валидации
+    с вырезанными окнами.
     """
     if persistence <= 1:
         return fired
@@ -64,8 +99,53 @@ def confirm_alarms(fired: np.ndarray, persistence: int = DEFAULT_PERSISTENCE) ->
     for k in range(1, persistence):
         shifted = np.zeros_like(fired)
         shifted[k:] = fired[:-k]
+        if segments is not None:
+            same = np.zeros(len(fired), dtype=bool)
+            same[k:] = segments[k:] == segments[:-k]
+            shifted &= same.reshape((-1,) + (1,) * (fired.ndim - 1))
         out &= shifted
     return out
+
+
+@dataclass(frozen=True)
+class Calibration:
+    """Нормальные окна, по которым подбирается порог. МЕТОК ТЕСТА ЗДЕСЬ НЕТ.
+
+    Порог, подобранный по нормальным точкам самого теста, использует
+    тестовые метки: чтобы знать, какие точки нормальные, надо заглянуть в
+    ``y_test``. Поэтому порог калибруется на валидационных днях, где
+    аномальных окон по построению нет, и переносится на тест без
+    изменений.
+
+    ``scores`` — score валидации **уже сведённые** тем же способом, что и
+    тестовые (``evaluation_view``), ``[n_val, M]``.
+    """
+
+    scores: np.ndarray
+    step_min: float
+    segments: np.ndarray | None = None
+
+    @property
+    def hours(self) -> float:
+        return self.scores.shape[0] * self.step_min / 60.0
+
+
+def threshold_from_calibration(
+    calib: Calibration,
+    target_per_hour: float,
+    *,
+    persistence: int = DEFAULT_PERSISTENCE,
+) -> float:
+    """Порог на ``target_per_hour`` подтверждённых ложных тревог в час по валидации.
+
+    Сигнатура не принимает ни меток, ни тестовых score: зависимость порога
+    от теста невозможна по построению (регрессионный тест
+    ``test_threshold_independent_of_test_labels``).
+    """
+    return threshold_at_alarm_rate(
+        calib.scores, np.zeros(calib.scores.shape, dtype=int), target_per_hour, calib.step_min,
+        persistence=persistence, segments=calib.segments,
+    )
 
 
 def threshold_at_fpr(
@@ -117,8 +197,14 @@ def threshold_at_alarm_rate(
     step_min: float,
     *,
     persistence: int = DEFAULT_PERSISTENCE,
+    segments: np.ndarray | None = None,
 ) -> float:
     """Порог, дающий заданное число ложных тревог в час **на всю сеть**.
+
+    ``y`` определяет, какие точки считаются нормальными. Для основного
+    протокола сюда передаются валидационные окна и нули
+    (:func:`threshold_from_calibration`); вызов с ``y`` теста подбирает
+    порог по тестовым меткам и допустим только как оракул.
 
     Почему это, а не поточечный FPR — главная рабочая точка бенчмарка.
 
@@ -151,7 +237,7 @@ def threshold_at_alarm_rate(
         return hi
 
     def n_false(thr: float) -> float:
-        confirmed = confirm_alarms(scores > thr, persistence)
+        confirmed = confirm_alarms(scores > thr, persistence, segments=segments)
         return float((confirmed & normal_mask).sum())
 
     for _ in range(50):
@@ -164,10 +250,15 @@ def threshold_at_alarm_rate(
 
 
 def observed_fpr(
-    scores: np.ndarray, y: np.ndarray, threshold: float, *, persistence: int = DEFAULT_PERSISTENCE
+    scores: np.ndarray,
+    y: np.ndarray,
+    threshold: float,
+    *,
+    persistence: int = DEFAULT_PERSISTENCE,
+    segments: np.ndarray | None = None,
 ) -> float:
     """Фактический поточечный FPR при данном пороге — для сопоставимости."""
-    confirmed = confirm_alarms(scores > threshold, persistence)
+    confirmed = confirm_alarms(scores > threshold, persistence, segments=segments)
     normal = y == 0
     return float((confirmed & normal).sum() / max(1, int(normal.sum())))
 
@@ -180,6 +271,7 @@ def event_delays(
     threshold: float,
     *,
     persistence: int = DEFAULT_PERSISTENCE,
+    segments: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Для каждого события — первая подтверждённая сработка и задержка в минутах.
 
@@ -197,7 +289,7 @@ def event_delays(
     DataFrame с колонками ``event_id``, ``detected``, ``delay_min``,
     ``t_first_alarm``, ``n_alarms``.
     """
-    fired = confirm_alarms(scores > threshold, persistence)
+    fired = confirm_alarms(scores > threshold, persistence, segments=segments)
     rows = []
     for ev in events.itertuples():
         mask = (event_id == ev.event_id) & fired
@@ -246,6 +338,7 @@ def alarms_per_hour(
     step_min: float,
     *,
     persistence: int = DEFAULT_PERSISTENCE,
+    segments: np.ndarray | None = None,
 ) -> float:
     """Подтверждённые ложные тревоги в час на всю сеть — операционная цена FPR.
 
@@ -254,7 +347,7 @@ def alarms_per_hour(
     эксплуатации: диспетчер, получающий 40 ложных тревог в час,
     выключит систему независимо от её AUC.
     """
-    confirmed = confirm_alarms(scores > threshold, persistence)
+    confirmed = confirm_alarms(scores > threshold, persistence, segments=segments)
     false_alarms = int((confirmed & (y == 0)).sum())
     hours = scores.shape[0] * step_min / 60.0
     return float(false_alarms / hours) if hours > 0 else float("nan")
@@ -272,29 +365,48 @@ def event_level_report(
     half_life_min: float = 15.0,
     step_min: float = 0.5,
     persistence: int = DEFAULT_PERSISTENCE,
+    calibration: Calibration | None = None,
+    segments: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Полный event-level отчёт при равном бюджете ложных тревог.
 
     Рабочая точка задаётся числом подтверждённых ложных тревог в час на
     всю сеть (``alarm_budget_per_hour``) — это операционная величина, см.
-    :func:`threshold_at_alarm_rate`. Если вместо неё задан ``fpr``,
-    используется поточечный порог: режим оставлен для сопоставимости с
-    литературой, но для ранжирования моделей не рекомендуется.
+    :func:`threshold_at_alarm_rate`.
+
+    **Откуда берётся порог.** С ``calibration`` — по нормальным окнам
+    валидации, тест порога не видит (основной протокол, ``threshold_source
+    = "validation"``). Без неё порог подбирается по нормальным точкам
+    теста, то есть по тестовым меткам: это оракульный режим для
+    юнит-тестов и диагностики, а не результат (``threshold_source =
+    "test_normals_ORACLE"``). Пайплайн (:func:`stad.metrics.full_report`)
+    без калибровки не работает вовсе.
+
+    Если вместо бюджета задан ``fpr``, используется поточечный порог:
+    режим для сопоставимости с литературой, всегда оракульный.
     """
     if len(events) == 0:
         raise ValueError("пустой реестр событий — метрики не определены")
     if fpr is not None:
         thr = threshold_at_fpr(scores, y, fpr, persistence=persistence)
+        source = "test_normals_ORACLE"
+    elif calibration is not None:
+        thr = threshold_from_calibration(calibration, alarm_budget_per_hour, persistence=persistence)
+        source = "validation"
     else:
         thr = threshold_at_alarm_rate(
-            scores, y, alarm_budget_per_hour, step_min, persistence=persistence
+            scores, y, alarm_budget_per_hour, step_min, persistence=persistence,
+            segments=segments,
         )
-    det = event_delays(scores, event_id, t_window, events, thr, persistence=persistence)
+        source = "test_normals_ORACLE"
+    det = event_delays(scores, event_id, t_window, events, thr, persistence=persistence,
+                       segments=segments)
     found = det.loc[det["detected"], "delay_min"].to_numpy()
     return {
         "threshold": thr,
+        "threshold_source": source,
         "alarm_budget_per_hour": alarm_budget_per_hour if fpr is None else float("nan"),
-        "fpr_observed": observed_fpr(scores, y, thr, persistence=persistence),
+        "fpr_observed": observed_fpr(scores, y, thr, persistence=persistence, segments=segments),
         "persistence": persistence,
         "event_recall": float(det["detected"].mean()),
         "n_events": int(len(det)),
@@ -304,7 +416,8 @@ def event_level_report(
         "p90_delay_min": float(np.quantile(found, 0.9)) if found.size else float("nan"),
         "earlier_than_report_share": float((found < 0).mean()) if found.size else 0.0,
         "padf": padf(det["delay_min"].to_numpy(), half_life_min=half_life_min),
-        "alarms_per_hour": alarms_per_hour(scores, y, thr, step_min, persistence=persistence),
+        "alarms_per_hour": alarms_per_hour(scores, y, thr, step_min, persistence=persistence,
+                                           segments=segments),
     }
 
 
@@ -319,6 +432,8 @@ def operating_curve(
     half_life_min: float = 15.0,
     step_min: float = 0.5,
     persistence: int = DEFAULT_PERSISTENCE,
+    calibration: Calibration | None = None,
+    segments: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Кривая «recall и задержка против бюджета ложных тревог в час».
 
@@ -336,6 +451,7 @@ def operating_curve(
                 scores, y, event_id, t_window, events,
                 alarm_budget_per_hour=b, half_life_min=half_life_min,
                 step_min=step_min, persistence=persistence,
+                calibration=calibration, segments=segments,
             )
             for b in budgets
         ]

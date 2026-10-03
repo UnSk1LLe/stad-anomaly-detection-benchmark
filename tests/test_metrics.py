@@ -255,3 +255,114 @@ def test_random_loses_at_operational_budget(toy):
         f"(padf={r['padf']:.3f}) — метрика обманываема"
     )
     assert r["event_recall"] < 0.7, f"случайный event_recall={r['event_recall']:.2f} слишком высок"
+
+
+# ------------------------------------------------ порог калибруется на валидации
+def _calibration(rng, n=300, N=4, step=1.0):
+    from stad.metrics import Calibration
+
+    return Calibration(scores=rng.standard_normal((n, N)), step_min=step)
+
+
+def test_threshold_independent_of_test_labels(toy):
+    """КРИТИЧНО: порог не зависит от тестовых меток и тестовых score.
+
+    Регрессионный тест на утечку: раньше порог подбирался по нормальным
+    точкам теста, то есть по ``y_test``. Здесь метки теста заменяются
+    целиком — порог при калибровке по валидации обязан остаться тем же,
+    а оракульный режим (по тесту) обязан измениться: тест различает оба.
+    """
+    y, eid, t, events, rng = toy
+    scores = rng.standard_normal(y.shape)
+    calib = _calibration(rng)
+
+    base = event_level_report(scores, y, eid, t, events, calibration=calib, step_min=1.0)
+    y_alt = 1 - y                                                # метки теста инвертированы
+    alt = event_level_report(scores, y_alt, eid, t, events, calibration=calib, step_min=1.0)
+    y_perm = rng.permutation(y.ravel()).reshape(y.shape)         # и перемешаны
+    perm = event_level_report(scores, y_perm, eid, t, events, calibration=calib, step_min=1.0)
+    other_scores = event_level_report(scores * 3.0 + 1.0, y, eid, t, events,
+                                      calibration=calib, step_min=1.0)
+
+    assert base["threshold"] == alt["threshold"] == perm["threshold"] == other_scores["threshold"]
+    assert base["threshold_source"] == "validation"
+
+    leaky = event_level_report(scores, y, eid, t, events, step_min=1.0)
+    leaky_alt = event_level_report(scores, y_alt, eid, t, events, step_min=1.0)
+    assert leaky["threshold_source"] == "test_normals_ORACLE"
+    assert leaky["threshold"] != leaky_alt["threshold"], (
+        "оракульный режим должен зависеть от меток теста — иначе тест выше ничего не различает"
+    )
+
+
+def test_calibration_threshold_meets_budget_on_validation(toy):
+    """Порог по валидации укладывается в бюджет тревог на самой валидации."""
+    from stad.metrics import threshold_from_calibration
+
+    _, _, _, _, rng = toy
+    calib = _calibration(rng, n=2000)
+    for budget in (0.5, 2.0, 6.0):
+        thr = threshold_from_calibration(calib, budget, persistence=3)
+        actual = alarms_per_hour(calib.scores, np.zeros(calib.scores.shape, dtype=int), thr,
+                                 1.0, persistence=3)
+        assert actual <= budget * 1.3 + 0.2, f"бюджет {budget}, факт {actual:.2f}"
+
+
+def test_confirmation_does_not_cross_segment_boundary():
+    """Серия «три подряд» не склеивает отрезки, между которыми вырезаны окна."""
+    from stad.metrics.event_level import confirm_alarms
+
+    fired = np.ones((6, 1), dtype=bool)
+    glued = confirm_alarms(fired, 3).ravel().tolist()
+    split = confirm_alarms(fired, 3, segments=np.array([0, 0, 1, 1, 1, 1])).ravel().tolist()
+    assert glued == [False, False, True, True, True, True]
+    assert split == [False, False, False, False, True, True]
+
+
+def test_contiguous_segments_break_on_gaps():
+    from stad.metrics import contiguous_segments
+
+    t = np.array([0, 1, 2, 10, 11, 12, 40.0])
+    assert contiguous_segments(t, 1.0).tolist() == [0, 0, 0, 1, 1, 1, 2]
+
+
+def test_calibration_requires_validation_scores():
+    """Без score валидации порог не калибруется вовсе — тест подставлять нельзя."""
+    import dataclasses
+
+    from stad.data import make_synthetic_corridor
+    from stad.metrics import full_report, make_calibration
+
+    d = make_synthetic_corridor(stations=5, lanes=3, days=2, step_min=1.0,
+                                n_events=6, window=8, seed=1)
+    scores = np.zeros(d.y_test.shape, dtype=np.float32)
+    with pytest.raises(ValueError, match="калибруется на валидации"):
+        full_report(scores, d, val_scores=None)
+    with pytest.raises(ValueError, match="t_val"):
+        make_calibration(np.zeros((len(d.X_val), d.n_nodes)),
+                         dataclasses.replace(d, t_val=None))
+
+
+@pytest.mark.parametrize("reduce", ["max", "q99", "q95", "mean"])
+def test_node_reduction_shapes_and_order(reduce):
+    """Агрегация по узлам сохраняет ось окон; max >= q99 >= q95 по построению."""
+    from types import SimpleNamespace
+
+    from stad.metrics import evaluation_view
+
+    rng = np.random.default_rng(0)
+    s = rng.standard_normal((50, 40))
+    data = SimpleNamespace(
+        meta={"labels_are_corridor_level": True},
+        y_test=np.zeros((50, 40), dtype=int), event_id_test=-np.ones((50, 40), dtype=int),
+    )
+    out, y, eid = evaluation_view(s, data, reduce=reduce)
+    assert out.shape == (50, 1) and y.shape == (50, 1) and eid.shape == (50, 1)
+
+    mx = evaluation_view(s, data, reduce="max")[0]
+    q99 = evaluation_view(s, data, reduce="q99")[0]
+    q95 = evaluation_view(s, data, reduce="q95")[0]
+    assert (mx >= q99 - 1e-12).all() and (q99 >= q95 - 1e-12).all()
+
+    with pytest.raises(ValueError, match="неизвестная агрегация"):
+        evaluation_view(s, data, reduce="median")

@@ -234,8 +234,8 @@ def load_ft_aed(
     clean_buffer: int = 8,
     n_lanes: int = 4,
     fold: int | None = None,
-    n_folds: int = 4,
-    fold_test_days: int = 3,
+    n_folds: int = 6,
+    fold_test_days: int = 2,
     fold_val_days: int = 2,
     fold_min_train_days: int = 6,
 ) -> SplitData:
@@ -272,9 +272,15 @@ def load_ft_aed(
 
         Зачем CV вообще. При одиночном сплите в тесте остаётся 18 событий
         из 63, и recall квантуется шагом 1/18 — различие между моделями
-        тонет в этой зернистости. Четыре фолда по 3 тестовых дня дают
-        около 44 событий суммарно и, что не менее важно, четыре блока
-        для теста Фридмана вместо одного.
+        тонет в этой зернистости. Шесть фолдов по 2 тестовых дня задействуют
+        12 дней из 20 под тест (раньше четыре по 3 — те же 12 дней, но
+        вдвое меньше блоков) и дают шесть блоков для теста Фридмана вместо
+        четырёх. Дней ровно ``fold_min_train_days + fold_val_days +
+        n_folds * fold_test_days = 6 + 2 + 12 = 20``: запаса нет.
+
+        Число событий на фолд зависит от ``label_source`` и ограничено
+        снизу не кодом, а данными: перед прогоном проверять
+        ``scripts/check_folds.py``.
     """
     root = Path(root)
     path = _find_csv(root)
@@ -394,6 +400,9 @@ def load_ft_aed(
         feature_names=FEATURES,
         X_train_anomalous=scaler.transform(X[anom_tr]) if len(anom_tr) else None,
         X_val_anomalous=scaler.transform(X[anom_va]) if len(anom_va) else None,
+        # без валидации X_val подменён куском train, и калибровать порог на нём
+        # нельзя: t_val=None заставляет калибровку упасть, а не молча сработать
+        t_val=t_end[keep_va] if len(keep_va) else None,
         meta={
             "dataset": "FT-AED",
             "source": SOURCE,

@@ -12,12 +12,16 @@
 * **Антипримеры (демонстрация инфляции, НЕ для ранжирования):**
   ``pa_f1``, ``pa_inflation_ratio``.
 """
+import re
+
 import numpy as np
 
 from .event_level import (
     DEFAULT_PERSISTENCE,
+    Calibration,
     alarms_per_hour,
     confirm_alarms,
+    contiguous_segments,
     event_delays,
     event_level_report,
     observed_fpr,
@@ -25,6 +29,8 @@ from .event_level import (
     padf,
     threshold_at_alarm_rate,
     threshold_at_fpr,
+    threshold_from_calibration,
+    window_spacing,
 )
 from .pointwise import (
     average_precision,
@@ -64,12 +70,76 @@ __all__ = [
     "threshold_at_fpr", "event_delays", "padf", "alarms_per_hour",
     "confirm_alarms", "DEFAULT_PERSISTENCE", "threshold_at_alarm_rate", "observed_fpr",
     "event_level_report", "operating_curve",
+    "Calibration", "threshold_from_calibration", "contiguous_segments", "window_spacing",
+    "reduce_scores", "make_calibration", "eval_segments", "NODE_REDUCERS",
     "average_precision", "roc_auc", "best_f1", "f1_at_threshold",
     "point_adjust", "pa_f1", "pointwise_report",
     "friedman", "nemenyi_cd", "mean_ranks", "rank_matrix",
     "bootstrap_ci", "paired_bootstrap_test", "variance_decomposition",
     "PRIMARY_METRICS", "FORBIDDEN_FOR_RANKING", "evaluation_view",
 ]
+
+
+#: Способы свести score по оси узлов. ``q99``/``q95`` — квантили по узлам;
+#: ``max`` — статистика с тяжёлым хвостом, а квантиль устойчивее к одиночному шумному узлу.
+NODE_REDUCERS: tuple[str, ...] = ("max", "q99", "q95", "mean")
+
+
+def _node_reducer(reduce: str):
+    if reduce == "max":
+        return lambda s: np.max(s, axis=1, keepdims=True)
+    if reduce == "mean":
+        return lambda s: np.mean(s, axis=1, keepdims=True)
+    m = re.fullmatch(r"q(\d{1,2})", reduce)
+    if m and 0 < int(m.group(1)) < 100:
+        q = int(m.group(1)) / 100.0
+        return lambda s: np.quantile(s, q, axis=1, keepdims=True)
+    raise ValueError(f"неизвестная агрегация по узлам {reduce!r}; доступны: {NODE_REDUCERS}")
+
+
+def reduce_scores(scores, data, *, reduce: str = "max"):
+    """Свести score к гранулярности меток: тест и калибровка должны проходить через одно и то же.
+
+    Для корридор-уровневых меток (FT-AED) — агрегация по узлам, иначе без изменений.
+    """
+    if not data.meta.get("labels_are_corridor_level"):
+        _node_reducer(reduce)           # проверить имя, даже если не применяется
+        return scores
+    return _node_reducer(reduce)(scores)
+
+
+def eval_segments(data) -> np.ndarray:
+    """Непрерывные участки тестовых окон: подтверждение не пересекает границу дней."""
+    return contiguous_segments(data.t_test)
+
+
+def make_calibration(val_scores, data, *, reduce: str = "max") -> Calibration:
+    """Калибровочная выборка порога из score валидационных окон.
+
+    Требует ``data.t_val``: валидационные окна не сплошные (вокруг событий
+    они вырезаны), и подтверждение через разрыв дало бы ложные серии.
+    Если валидации нет, порог не калибруется вовсе — подставлять тест или
+    train нельзя: первое утечка, второе оптимистично смещено.
+    """
+    if val_scores is None:
+        raise ValueError(
+            "нет score валидации: порог калибруется на валидации, а не на тесте "
+            "(CLAUDE.md, правило 3)"
+        )
+    if getattr(data, "t_val", None) is None:
+        raise ValueError(
+            "SplitData.t_val не задан — валидационные окна не привязаны ко времени, "
+            "калибровка порога невозможна"
+        )
+    val_scores = np.asarray(val_scores)
+    if len(val_scores) != len(data.t_val):
+        raise ValueError(f"score валидации {val_scores.shape} не соответствует t_val {data.t_val.shape}")
+    spacing = window_spacing(data.t_test)
+    return Calibration(
+        scores=reduce_scores(val_scores, data, reduce=reduce),
+        step_min=float(data.meta.get("step_min", 0.5)),
+        segments=contiguous_segments(data.t_val, spacing),
+    )
 
 
 def evaluation_view(scores, data, *, reduce: str = "max"):
@@ -93,10 +163,10 @@ def evaluation_view(scores, data, *, reduce: str = "max"):
     возвращает входные массивы без изменений.
     """
     if not data.meta.get("labels_are_corridor_level"):
+        _node_reducer(reduce)
         return scores, data.y_test, data.event_id_test
-    agg = {"max": np.max, "mean": np.mean}[reduce]
     return (
-        agg(scores, axis=1, keepdims=True),
+        reduce_scores(scores, data, reduce=reduce),
         data.y_test[:, :1],
         data.event_id_test[:, :1],
     )
@@ -106,18 +176,27 @@ def full_report(
     scores,
     data,
     *,
+    val_scores,
     alarm_budget_per_hour: float = 1.0,
     half_life_min: float = 15.0,
     persistence: int = DEFAULT_PERSISTENCE,
+    reduce: str = "max",
 ) -> dict[str, float]:
-    """Единая точка входа: event-level + поточечные метрики для одного прогона."""
+    """Единая точка входа: event-level + поточечные метрики для одного прогона.
+
+    ``val_scores`` обязателен: порог калибруется по нормальным окнам
+    валидации и переносится на тест без изменений. Подбор порога по
+    тестовым меткам запрещён (CLAUDE.md, правило 3).
+    """
     step_min = float(data.meta.get("step_min", 0.5))
-    s, y, eid = evaluation_view(scores, data)
+    s, y, eid = evaluation_view(scores, data, reduce=reduce)
     ev = event_level_report(
         s, y, eid, data.t_test, data.events,
         alarm_budget_per_hour=alarm_budget_per_hour,
         half_life_min=half_life_min, step_min=step_min,
         persistence=persistence,
+        calibration=make_calibration(val_scores, data, reduce=reduce),
+        segments=eval_segments(data),
     )
     pt = pointwise_report(s, y, eid, threshold=ev["threshold"])
     return {**ev, **pt}

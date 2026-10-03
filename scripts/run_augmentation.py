@@ -59,6 +59,10 @@ def main() -> int:
     kwargs = yaml.safe_load(args.data_config.read_text(encoding="utf-8")) or {}
     kwargs.pop("train_days", None)
     kwargs.pop("val_days", None)
+    # геометрия этого арма — 4 фолда по 3 тестовых дня; умолчания load_ft_aed
+    # изменены под основную сетку (6 по 2), и менять определение арма нельзя
+    kwargs.setdefault("n_folds", 4)
+    kwargs.setdefault("fold_test_days", 3)
     if not Path(kwargs.get("root", "data/ft-aed")).exists():
         print(f"Нет данных в {kwargs.get('root')}. Сначала: "
               f"python scripts/download_data.py --dataset ft-aed", file=sys.stderr)

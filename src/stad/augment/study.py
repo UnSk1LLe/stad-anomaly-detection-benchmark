@@ -43,7 +43,7 @@ import numpy as np
 import pandas as pd
 
 from ..data.types import SplitData
-from ..metrics import evaluation_view
+from ..metrics import eval_segments, evaluation_view, make_calibration
 from ..metrics.event_level import event_level_report
 from ..metrics.pointwise import average_precision
 from .gan import AnomalyGAN, GANConfig
@@ -178,11 +178,14 @@ def run_study(
                         )
                         scores = det.score(data.X_test)
                         s, y, eid = evaluation_view(scores, data)
+                        # порог — по нормальным окнам валидации, не по тестовым меткам
                         rep = event_level_report(
                             s, y, eid, data.t_test, data.events,
                             alarm_budget_per_hour=cfg.alarm_budget_per_hour,
                             half_life_min=cfg.half_life_min,
                             step_min=step_min, persistence=cfg.persistence,
+                            calibration=make_calibration(det.score(data.X_val), data),
+                            segments=eval_segments(data),
                         )
                         rows.append({
                             "dataset": ds_name, "block": f"{ds_name}|s{seed}", "seed": seed,

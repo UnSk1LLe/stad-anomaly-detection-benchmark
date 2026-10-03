@@ -66,6 +66,12 @@ class SplitData:
     X_train_anomalous: np.ndarray | None = None
     X_val_anomalous: np.ndarray | None = None
 
+    #: ``[n_val]`` время конца каждого валидационного окна, минуты (та же шкала,
+    #: что ``t_test``). Нужно, чтобы порог калибровался на валидации: окна там
+    #: не сплошные (вокруг событий вырезаны), и подтверждение тревоги не должно
+    #: пересекать разрывы. ``None`` — калибровка порога невозможна.
+    t_val: np.ndarray | None = None
+
     # ------------------------------------------------------------------ utils
     @property
     def n_nodes(self) -> int:
@@ -104,6 +110,8 @@ class SplitData:
             raise ValueError("event_id_test и y_test должны совпадать по форме")
         if self.t_test.shape != (n_test,):
             raise ValueError(f"t_test: ожидается ({n_test},), получено {self.t_test.shape}")
+        if self.t_val is not None and self.t_val.shape != (self.X_val.shape[0],):
+            raise ValueError(f"t_val: ожидается ({self.X_val.shape[0]},), получено {self.t_val.shape}")
         if self.A.shape != (self.n_nodes, self.n_nodes):
             raise ValueError(f"A: ожидается {(self.n_nodes, self.n_nodes)}")
         if len(self.feature_names) != self.n_features:

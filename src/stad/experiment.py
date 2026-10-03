@@ -16,10 +16,13 @@ import pandas as pd
 import yaml
 
 from .data import SplitData, load_dataset
-from .metrics import evaluation_view
-from .metrics.event_level import threshold_at_alarm_rate
+from .metrics import (
+    evaluation_view,
+    make_calibration,
+    threshold_from_calibration,
+)
 from .registry import REFERENCE, get_grid
-from .report import write_results_md
+from .report import primary_runs, write_results_md
 from .runner import run_grid
 from .train import TrainConfig
 from .viz import (
@@ -51,6 +54,9 @@ class ExperimentConfig:
     half_life_min: float = 15.0
     # сколько подряд идущих окон подтверждают тревогу (логика California)
     persistence: int = 3
+    # Как свести score по узлам к гранулярности меток (корридор-уровневые метки
+    # FT-AED): max | q99 | q95 | mean. Фиксируется до итогового прогона.
+    node_reduce: str = "max"
     primary_metric: str = "padf"
     # Сохранять обученные веса. По умолчанию ДА: прогон стоит часы, а
     # чекпойнт нужен, чтобы посмотреть выученное, прогнать модель на
@@ -101,7 +107,8 @@ def build_datasets(cfg: ExperimentConfig) -> dict[str, SplitData]:
 
 # --------------------------------------------------------------------- фигуры
 def _pr_data(
-    runs: pd.DataFrame, data: SplitData, scores_dir: Path, dataset: str, seed: int, top: int = 5
+    runs: pd.DataFrame, data: SplitData, scores_dir: Path, dataset: str, seed: int, top: int = 5,
+    *, reduce: str = "max",
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     from sklearn.metrics import precision_recall_curve
 
@@ -122,7 +129,7 @@ def _pr_data(
         if not f.exists():
             continue
         s = np.load(f)
-        s, y, _ = evaluation_view(s, data)
+        s, y, _ = evaluation_view(s, data, reduce=reduce)
         precision, recall, _ = precision_recall_curve(y.ravel(), s.ravel())
         out[r.label] = (recall, precision)
     return out
@@ -140,6 +147,7 @@ def _event_traces(
     persistence: int = 3,
     top: int = 4,
     window_min: float = 45.0,
+    reduce: str = "max",
 ) -> pd.DataFrame:
     """След score вокруг одного события для нескольких лучших моделей.
 
@@ -159,11 +167,15 @@ def _event_traces(
     loaded: dict[str, tuple[str, np.ndarray, float]] = {}
     for r in cand.itertuples():
         f = scores_dir / f"{r.config}__{dataset}__seed{seed}.npy"
-        if f.exists():
-            s = np.load(f)
-            s, y_ev, _ = evaluation_view(s, data)
-            thr = threshold_at_alarm_rate(s, y_ev, alarm_budget, step_min,
-                                          persistence=persistence)
+        f_val = scores_dir / f"{r.config}__{dataset}__seed{seed}__val.npy"
+        # порог — по валидации; без score валидации трассу не строим, а не
+        # подбираем порог по тесту
+        if f.exists() and f_val.exists():
+            s, _, _ = evaluation_view(np.load(f), data, reduce=reduce)
+            thr = threshold_from_calibration(
+                make_calibration(np.load(f_val), data, reduce=reduce), alarm_budget,
+                persistence=persistence,
+            )
             loaded[r.config] = (r.label, s, thr)
     if not loaded:
         return pd.DataFrame()
@@ -228,8 +240,10 @@ def make_figures(
     def collect(paths):
         produced.extend(p.name for p in paths if p.suffix == ".png")
 
+    # CD-диаграмма — только по предзарегистрированному подмножеству: омнибусный
+    # тест по всем конфигурациям при 20-30 блоках не обладает мощностью
     collect(fig_critical_difference(
-        runs, metric=metric,
+        primary_runs(runs)[0], metric=metric,
         higher_is_better=metric != "median_delay_min",
         out_dir=fig_dir, tables_dir=tbl_dir,
     ))
@@ -246,7 +260,7 @@ def make_figures(
 
     ds_name = next(iter(datasets))
     seed = cfg.seeds[0]
-    pr = _pr_data(runs, datasets[ds_name], scores_dir, ds_name, seed)
+    pr = _pr_data(runs, datasets[ds_name], scores_dir, ds_name, seed, reduce=cfg.node_reduce)
     if pr:
         collect(fig_pr_curves(pr, datasets[ds_name].prevalence, out_dir=fig_dir, tables_dir=tbl_dir))
 
@@ -261,7 +275,7 @@ def make_figures(
     traces = _event_traces(runs, datasets[ds_name], scores_dir, ds_name, seed,
                            alarm_budget=cfg.alarm_budget_per_hour,
                            step_min=float(datasets[ds_name].meta.get('step_min', 0.5)),
-                           persistence=cfg.persistence)
+                           persistence=cfg.persistence, reduce=cfg.node_reduce)
     if not traces.empty:
         collect(fig_event_timeline(traces, out_dir=fig_dir, tables_dir=tbl_dir))
 
@@ -300,8 +314,8 @@ def run_experiment(cfg: ExperimentConfig, *, verbose: bool = True) -> dict:
         seeds=cfg.seeds, train_cfg=cfg.train_config(), param_budget=cfg.param_budget,
         out_dir=out, alarm_budget_per_hour=cfg.alarm_budget_per_hour,
         half_life_min=cfg.half_life_min,
-        persistence=cfg.persistence, save_checkpoints=cfg.save_checkpoints,
-        verbose=verbose,
+        persistence=cfg.persistence, node_reduce=cfg.node_reduce,
+        save_checkpoints=cfg.save_checkpoints, verbose=verbose,
     )
     runs, curves = artifacts["runs"], artifacts["curves"]
     if runs.empty:

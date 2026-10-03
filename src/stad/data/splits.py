@@ -123,6 +123,7 @@ def build_split(
         events=ev,
         A=A.astype(np.float32),
         feature_names=list(feature_names),
+        t_val=t_end[keep_va].astype(np.float64) if len(keep_va) else None,
         meta={
             **(meta or {}),
             "n_train_windows": int(len(keep_tr)),

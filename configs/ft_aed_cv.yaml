@@ -39,19 +39,27 @@ datasets:
   fold0:
     loader: ft-aed
     from_file: configs/data/ft_aed.yaml
-    kwargs: {fold: 0}
+    kwargs: {fold: 0, n_folds: 6, fold_test_days: 2}
   fold1:
     loader: ft-aed
     from_file: configs/data/ft_aed.yaml
-    kwargs: {fold: 1}
+    kwargs: {fold: 1, n_folds: 6, fold_test_days: 2}
   fold2:
     loader: ft-aed
     from_file: configs/data/ft_aed.yaml
-    kwargs: {fold: 2}
+    kwargs: {fold: 2, n_folds: 6, fold_test_days: 2}
   fold3:
     loader: ft-aed
     from_file: configs/data/ft_aed.yaml
-    kwargs: {fold: 3}
+    kwargs: {fold: 3, n_folds: 6, fold_test_days: 2}
+  fold4:
+    loader: ft-aed
+    from_file: configs/data/ft_aed.yaml
+    kwargs: {fold: 4, n_folds: 6, fold_test_days: 2}
+  fold5:
+    loader: ft-aed
+    from_file: configs/data/ft_aed.yaml
+    kwargs: {fold: 5, n_folds: 6, fold_test_days: 2}
 
 train:
   epochs: 12

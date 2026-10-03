@@ -6,6 +6,8 @@
 * операционная кривая в ``curves.csv``;
 * сырые score в ``scores/<config>__<dataset>__seed<k>.npy`` — чтобы
   фигуры и статистику можно было пересчитать без повторного обучения;
+* score валидации там же, с суффиксом ``__val.npy``: порог калибруется по
+  ним, а не по тесту, и без них порог не пересчитать;
 * таблица подбора бюджета в ``budget.csv``.
 
 Блок (``block``) — это «датасет × сид»: единица, внутри которой методы
@@ -29,7 +31,13 @@ from .checkpoints import checkpoint_path, save_detector
 from .data.types import SplitData
 from .encoders import ENCODER_LABELS
 from .heads import HEAD_LABELS, HEAD_MECHANISM
-from .metrics import evaluation_view, full_report, operating_curve
+from .metrics import (
+    eval_segments,
+    evaluation_view,
+    full_report,
+    make_calibration,
+    operating_curve,
+)
 from .model import build_detector
 from .registry import Config, GROUP_LABELS
 from .train import TrainConfig, train_detector
@@ -71,9 +79,14 @@ def run_config(
     alarm_budget_per_hour: float = 1.0,
     half_life_min: float = 15.0,
     persistence: int = 3,
+    node_reduce: str = "max",
     checkpoint_dir: str | Path | None = None,
-) -> tuple[dict, pd.DataFrame, np.ndarray, dict | None]:
-    """Выполнить одну конфигурацию. Возвращает ``(метрики, кривая, score, бюджет)``."""
+) -> tuple[dict, pd.DataFrame, np.ndarray, dict | None, np.ndarray]:
+    """Выполнить одну конфигурацию.
+
+    Возвращает ``(метрики, кривая, score теста, бюджет, score валидации)``.
+    Порог калибруется по score валидации и переносится на тест без изменений.
+    """
     budget_row: dict | None = None
 
     if cfg.is_trainable:
@@ -108,7 +121,7 @@ def run_config(
         outcome = train_detector(
             detector, data, train_cfg, seed=seed, randomize_only=cfg.randomize_only
         )
-        scores = outcome.scores
+        scores, val_scores = outcome.scores, outcome.val_scores
 
         # веса сохраняются вместе с рецептом сборки: hidden подбирается на
         # лету под бюджет параметров, и без рецепта чекпойнт не восстановить
@@ -158,6 +171,7 @@ def run_config(
         fit_s = time.perf_counter() - t0
         t1 = time.perf_counter()
         scores = np.asarray(model.score(data), dtype=np.float32)
+        val_scores = np.asarray(model.score_val(data), dtype=np.float32)
         inf_s = time.perf_counter() - t1
         runtime = {
             "n_params": int(getattr(model, "n_params", 0)),
@@ -170,13 +184,17 @@ def run_config(
             "uses_graph": cfg.baseline == "california",
         }
 
-    metrics = full_report(scores, data, alarm_budget_per_hour=alarm_budget_per_hour,
-                          half_life_min=half_life_min, persistence=persistence)
-    s_eval, y_eval, eid_eval = evaluation_view(scores, data)
+    metrics = full_report(scores, data, val_scores=val_scores,
+                          alarm_budget_per_hour=alarm_budget_per_hour,
+                          half_life_min=half_life_min, persistence=persistence,
+                          reduce=node_reduce)
+    s_eval, y_eval, eid_eval = evaluation_view(scores, data, reduce=node_reduce)
     curve = operating_curve(
         s_eval, y_eval, eid_eval, data.t_test, data.events,
         half_life_min=half_life_min, step_min=float(data.meta.get("step_min", 0.5)),
         persistence=persistence,
+        calibration=make_calibration(val_scores, data, reduce=node_reduce),
+        segments=eval_segments(data),
     )
 
     row = {
@@ -198,7 +216,7 @@ def run_config(
         **metrics,
     }
     curve = curve.assign(config=cfg.name, label=cfg.label, dataset=dataset_name, seed=seed)
-    return row, curve, scores, budget_row
+    return row, curve, scores, budget_row, val_scores
 
 
 def run_grid(
@@ -212,6 +230,7 @@ def run_grid(
     alarm_budget_per_hour: float = 1.0,
     half_life_min: float = 15.0,
     persistence: int = 3,
+    node_reduce: str = "max",
     save_checkpoints: bool = True,
     save_scores: bool = True,
     verbose: bool = True,
@@ -240,11 +259,12 @@ def run_grid(
                 done += 1
                 tag = f"[{done}/{total}] {ds_name} seed={seed} {cfg.name}"
                 try:
-                    row, curve, scores, budget = run_config(
+                    row, curve, scores, budget, val_scores = run_config(
                         cfg, data, seed=seed, dataset_name=ds_name,
                         train_cfg=train_cfg, param_budget=param_budget,
                         alarm_budget_per_hour=alarm_budget_per_hour,
                         half_life_min=half_life_min, persistence=persistence,
+                        node_reduce=node_reduce,
                         checkpoint_dir=out_dir if save_checkpoints else None,
                     )
                     rows.append(row)
@@ -253,6 +273,9 @@ def run_grid(
                         budgets.append(budget)
                     if save_scores:
                         np.save(out_dir / "scores" / f"{cfg.name}__{ds_name}__seed{seed}.npy", scores)
+                        # score валидации — чтобы пересчитывать порог без переобучения
+                        np.save(out_dir / "scores" / f"{cfg.name}__{ds_name}__seed{seed}__val.npy",
+                                val_scores)
                     if verbose:
                         print(
                             f"{tag}  recall={row['event_recall']:.3f} "
@@ -286,6 +309,8 @@ def run_grid(
         "alarm_budget_per_hour": alarm_budget_per_hour,
         "half_life_min": half_life_min,
         "persistence": persistence,
+        "node_reduce": node_reduce,
+        "threshold_source": "validation",
         "save_checkpoints": save_checkpoints,
         "train_config": asdict(train_cfg),
         "datasets": {k: v.meta for k, v in datasets.items()},

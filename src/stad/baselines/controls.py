@@ -27,9 +27,28 @@
 """
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 from ..data.types import SplitData
+
+
+def validation_as_test(data: SplitData) -> SplitData:
+    """Копия ``data``, где «тестом» служат валидационные окна без меток.
+
+    Бейзлайны читают только ``X_test`` и форму ``y_test``, поэтому так
+    они скорят валидацию тем же кодом, что и тест: порог калибруется на
+    валидации, тестовые метки в калибровке не участвуют.
+    """
+    n = len(data.X_val)
+    return dataclasses.replace(
+        data,
+        X_test=data.X_val,
+        y_test=np.zeros((n, data.n_nodes), dtype=np.int64),
+        event_id_test=np.full((n, data.n_nodes), -1, dtype=np.int64),
+        t_test=data.t_val if data.t_val is not None else np.arange(n, dtype=np.float64),
+    )
 
 
 class BaselineScorer:
@@ -45,6 +64,10 @@ class BaselineScorer:
         """``-> [n_test, N]``, больше = аномальнее."""
         raise NotImplementedError
 
+    def score_val(self, data: SplitData) -> np.ndarray:
+        """Score валидационных окон ``[n_val, N]`` — для калибровки порога."""
+        return self.score(validation_as_test(data))
+
 
 class RandomScorer(BaselineScorer):
     """Случайный score. Детектор без навыка — контроль метрики."""
@@ -57,6 +80,11 @@ class RandomScorer(BaselineScorer):
     def score(self, data: SplitData) -> np.ndarray:
         rng = np.random.default_rng(self.seed)
         return rng.standard_normal(data.y_test.shape).astype(np.float32)
+
+    def score_val(self, data: SplitData) -> np.ndarray:
+        # независимый поток: иначе score валидации были бы началом тестового ряда
+        rng = np.random.default_rng((self.seed, 1))
+        return rng.standard_normal((len(data.X_val), data.n_nodes)).astype(np.float32)
 
 
 class ConstantScorer(BaselineScorer):

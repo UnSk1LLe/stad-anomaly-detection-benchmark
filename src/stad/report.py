@@ -30,7 +30,7 @@ from .metrics.stats import (
     paired_bootstrap_test,
     variance_decomposition,
 )
-from .registry import REFERENCE
+from .registry import PRIMARY_COMPARISON, REFERENCE
 
 
 @dataclass
@@ -45,6 +45,30 @@ class Check:
     @property
     def mark(self) -> str:
         return "OK" if self.passed else ("ПРОВАЛ" if self.critical else "ВНИМАНИЕ")
+
+
+def primary_runs(runs: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """Прогоны предзарегистрированного подмножества для выводной статистики.
+
+    Возвращает ``(подмножество, примечание)``. Если в прогоне нет хотя бы
+    трёх конфигураций из ``PRIMARY_COMPARISON`` (smoke, синтетика), тест
+    считается по всем конфигурациям, и примечание об этом говорит прямо:
+    итоговая сетка ``core`` содержит подмножество целиком.
+    """
+    present = [c for c in PRIMARY_COMPARISON if c in set(runs["config"])]
+    if len(present) >= 3:
+        missing = [c for c in PRIMARY_COMPARISON if c not in present]
+        note = f"отсутствуют в прогоне: {', '.join(missing)}" if missing else ""
+        return runs[runs["config"].isin(present)], note
+    return runs, (
+        f"PRIMARY_COMPARISON представлен в прогоне {len(present)} конфигурациями из "
+        f"{len(PRIMARY_COMPARISON)}, тест считается по ВСЕМ конфигурациям сетки"
+    )
+
+
+def _block_pivot(runs: pd.DataFrame, metric: str, *, by: str = "block") -> pd.DataFrame:
+    pivot = runs.pivot_table(index=by, columns="config", values=metric, aggfunc="mean")
+    return pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
 
 
 def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
@@ -135,8 +159,10 @@ def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
     # размах средних рангов — тогда тест не может отвергнуть равенство
     # ни при каких данных, и «различий не обнаружено» означает
     # «эксперимент недостаточно мощный», а не «методы одинаковы».
-    pivot = runs.pivot_table(index="block", columns="config", values="padf", aggfunc="mean")
-    pivot = pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
+    # Считается по предзарегистрированному подмножеству PRIMARY_COMPARISON:
+    # бейзлайны и контроли в выводной тест не входят.
+    sub, sub_note = primary_runs(runs)
+    pivot = _block_pivot(sub, "padf")
     if pivot.shape[1] >= 3 and pivot.shape[0] >= 2:
         ranks = mean_ranks(pivot)
         spread = float(ranks.max() - ranks.min())
@@ -148,16 +174,38 @@ def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
                 "Мощность: критическая разница меньше размаха рангов",
                 spread > cd,
                 f"размах средних рангов {spread:.2f}, CD={cd:.2f} при {pivot.shape[0]} блоках "
-                f"и {pivot.shape[1]} методах. "
+                f"и {pivot.shape[1]} методах (PRIMARY_COMPARISON). "
                 + (
                     "Дизайн способен обнаружить различие."
                     if spread > cd else
                     f"CD превышает весь размах — тест не может отвергнуть равенство НИ ПРИ КАКИХ "
                     f"данных. Нужно около {need} блоков (сид × фолд) при текущем числе методов, "
                     f"либо меньше методов в одном сравнении."
-                ),
+                )
+                + (f" Примечание: {sub_note}." if sub_note else ""),
             )
         )
+
+        # Блок «датасет × сид» считает сиды одного фолда независимыми повторами,
+        # хотя данные у них общие. Консервативная оценка — усреднить сиды внутри
+        # фолда и взять блоком фолд. Информационная проверка: критической не
+        # является, но показывает, насколько мощность держится на сидах.
+        if "dataset" in sub.columns and sub["seed"].nunique() > 1:
+            fold_pivot = _block_pivot(sub, "padf", by="dataset")
+            if fold_pivot.shape[0] >= 2 and fold_pivot.shape[1] >= 3:
+                f_ranks = mean_ranks(fold_pivot)
+                f_spread = float(f_ranks.max() - f_ranks.min())
+                f_cd = nemenyi_cd(fold_pivot.shape[1], fold_pivot.shape[0])
+                checks.append(
+                    Check(
+                        "Мощность на уровне фолдов (сиды усреднены внутри фолда)",
+                        f_spread > f_cd,
+                        f"размах {f_spread:.2f}, CD={f_cd:.2f} при {fold_pivot.shape[0]} фолдах. "
+                        "Сиды одного фолда не независимы, поэтому это консервативная оценка; "
+                        "расхождение с проверкой выше означает, что мощность держится на сидах.",
+                        critical=False,
+                    )
+                )
 
     if "budget_within_tolerance" in runs.columns:
         bad = runs.loc[runs["budget_within_tolerance"] == False, "config"].unique()  # noqa: E712
@@ -190,15 +238,18 @@ def rank_table(runs: pd.DataFrame, *, metric: str = "padf", higher_is_better: bo
         inference_ms=("inference_ms_per_window", "mean"),
         n_runs=("padf", "size"),
     )
-    pivot = runs.pivot_table(index="block", columns="config", values=metric, aggfunc="mean")
-    pivot = pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
+    # ранги — только внутри предзарегистрированного подмножества; остальные
+    # конфигурации в таблице описательно (ранг «—»)
+    sub, _ = primary_runs(runs)
+    pivot = _block_pivot(sub, metric)
     if pivot.shape[1] >= 3 and pivot.shape[0] >= 2:
         ranks = mean_ranks(pivot, higher_is_better=higher_is_better)
         agg["mean_rank"] = agg["config"].map(ranks)
     else:
         agg["mean_rank"] = np.nan
-    return agg.sort_values("mean_rank" if agg["mean_rank"].notna().any() else metric,
-                           ascending=agg["mean_rank"].notna().any())
+    agg["in_primary"] = agg["mean_rank"].notna()
+    return agg.sort_values(["in_primary", "mean_rank", metric],
+                           ascending=[False, True, not higher_is_better]).reset_index(drop=True)
 
 
 def compare_to_reference(
@@ -258,8 +309,7 @@ def decide(
 
     # мощность гейтит все правила: при CD больше размаха «различий нет»
     # означает «эксперимент не мог их увидеть», а не «методы равны»
-    pivot = runs.pivot_table(index="block", columns="config", values=metric, aggfunc="mean")
-    pivot = pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
+    pivot = _block_pivot(primary_runs(runs)[0], metric)
     underpowered = False
     if pivot.shape[1] >= 3 and pivot.shape[0] >= 2:
         rk = mean_ranks(pivot)
@@ -432,8 +482,8 @@ def write_results_md(
     eta = axis_importance(runs, metric=metric)
     rules = decide(runs, metric=metric)
 
-    pivot = runs.pivot_table(index="block", columns="config", values=metric, aggfunc="mean")
-    pivot = pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
+    sub, sub_note = primary_runs(runs)
+    pivot = _block_pivot(sub, metric)
     fried = friedman(pivot) if pivot.shape[1] >= 3 else {"p_value": float("nan")}
     cd = nemenyi_cd(pivot.shape[1], pivot.shape[0]) if pivot.shape[1] >= 3 else float("nan")
 
@@ -475,12 +525,17 @@ def write_results_md(
         f"Рабочая точка — **{manifest.get('alarm_budget_per_hour', 1.0)} подтверждённая ложная тревога в час "
         f"на всю сеть**, подтверждение {manifest.get('persistence', 3)} окна подряд. "
         f"Тест Фридмана: p = {fried.get('p_value', float('nan')):.2e}, "
-        f"критическая разница рангов CD = {cd:.2f}.\n"
+        f"критическая разница рангов CD = {cd:.2f} — **только по предзарегистрированному "
+        f"подмножеству** ({pivot.shape[1]} методов × {pivot.shape[0]} блоков: "
+        f"{', '.join(pivot.columns)}). Ранг указан у них; бейзлайны и протокольные "
+        f"контроли в сводной таблице описательно, в выводной тест не входят."
+        + (f" Примечание: {sub_note}." if sub_note else "")
+        + "\n"
     )
     cols = ["label", "group_label", "mean_rank", "padf", "padf_std", "event_recall",
             "median_delay_min", "average_precision", "ap_lift", "fpr_observed",
             "n_params", "inference_ms"]
-    head = ["Конфигурация", "Группа", "Ранг", "padf", "±", "event-recall",
+    head = ["Конфигурация", "Группа", "Ранг (PRIMARY)", "padf", "±", "event-recall",
             "задержка, мин", "AP", "AP/случайный", "факт. FPR", "параметров", "мс/окно"]
     L.append("| " + " | ".join(head) + " |")
     L.append("|" + "---|" * len(head))
