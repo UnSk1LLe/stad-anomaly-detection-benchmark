@@ -127,6 +127,7 @@ def fig_operating_curves(
     tables_dir: Path,
     highlight: tuple[str, ...] = (),
     max_series: int = 6,
+    working_point: float = 1.0,
 ) -> list[Path]:
     """Две панели: event-recall и задержка против целевого FPR.
 
@@ -139,6 +140,17 @@ def fig_operating_curves(
     противоположно при 0.1%, а рабочая точка диспетчерской — именно там,
     потому что цена ложной тревоги на сети из сотен узлов высока.
     """
+    # УСРЕДНЕНИЕ ПО БЛОКАМ ОБЯЗАТЕЛЬНО. При кросс-валидации на каждую
+    # рабочую точку приходится по строке с каждого фолда и сида. Если
+    # рисовать их как есть, линия соединяет точки разных фолдов и
+    # получается зигзаг, не имеющий смысла: он отражает различие между
+    # днями, а не форму компромисса.
+    agg_cols = [c for c in ("event_recall", "median_delay_min", "padf", "alarms_per_hour")
+                if c in curves.columns]
+    curves = (
+        curves.groupby(["label", "alarm_budget_per_hour"], as_index=False)[agg_cols].mean()
+    )
+
     labels = list(dict.fromkeys(curves["label"]))
     if highlight:
         labels = [l for l in labels if l in highlight] + [l for l in labels if l not in highlight]
@@ -167,7 +179,7 @@ def fig_operating_curves(
     for ax in axes:
         ax.set_xscale("log")
         ax.set_xlabel("бюджет ложных тревог, в час на всю сеть")
-        ax.axvline(1.0, color=INK_MUTED, lw=0.9, ls=":")  # принятая рабочая точка
+        ax.axvline(working_point, color=INK_MUTED, lw=0.9, ls=":")  # принятая рабочая точка
     axes[0].set_ylabel("доля обнаруженных событий")
     axes[0].set_ylim(0, 1.02)
     axes[0].set_title("Event-recall против бюджета тревог")
@@ -181,7 +193,8 @@ def fig_operating_curves(
     axes[0].legend(loc="lower right", fontsize=7.5, ncol=1)
     annotate_source(
         fig,
-        "Пунктир — рабочая точка 1 подтверждённая ложная тревога в час на сеть. "
+        f"Пунктир — принятая рабочая точка: {working_point} подтверждённой ложной тревоги "
+        "в час на всю сеть. Линии усреднены по фолдам и сидам. "
         "Ось в тревогах в час, а не в процентах FPR: это единица, в которой решает эксплуатант.",
     )
     return save(fig, out_dir, "fig02_operating_curves", table=curves, tables_dir=tables_dir)

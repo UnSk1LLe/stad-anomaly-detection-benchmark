@@ -237,6 +237,7 @@ def make_figures(
         )
         collect(fig_operating_curves(
             curves, out_dir=fig_dir, tables_dir=tbl_dir, highlight=tuple(top[:5]),
+            working_point=cfg.alarm_budget_per_hour,
         ))
 
     ds_name = next(iter(datasets))
