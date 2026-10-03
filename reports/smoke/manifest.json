@@ -1,6 +1,6 @@
 {
   "environment": {
-    "git_sha": "unknown",
+    "git_sha": "9b6e720",
     "python": "3.13.16",
     "platform": "Linux-6.18.44-fc-v64-x86_64-with-glibc2.39",
     "torch": "2.14.1+cu130",
