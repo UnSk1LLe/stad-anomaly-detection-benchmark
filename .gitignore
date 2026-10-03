@@ -1,20 +1,8 @@
-# Сырые данные не версионируются: лицензия и размер.
-# Слэш В НАЧАЛЕ обязателен: без него шаблон матчит ЛЮБОЙ каталог с таким
-# именем на любой глубине, и из репозитория молча выпадают src/stad/data/
-# и configs/data/ — то есть весь слой данных. Именно это и произошло
-# в первом коммите.
 /data/
 !/data/.gitkeep
 
-# результаты прогонов: тяжёлые score и фигуры пересоздаются из кода
-reports/*/scores/
-reports/*/figures/*.png
-reports/*/figures/*.pdf
-reports/scores/
-reports/figures/*.png
-reports/figures/*.pdf
+reports
 
-# НО итоговые таблицы и отчёты версионируются — это артефакт исследования
 !reports/*/RESULTS.md
 !reports/*/runs.csv
 !reports/*/curves.csv
@@ -22,14 +10,11 @@ reports/figures/*.pdf
 !reports/*/manifest.json
 !reports/*/tables/*.csv
 
-# Чекпойнты: тяжёлые и воспроизводятся из кода, но НА ДИСКЕ нужны —
-# прогон стоит часы. Лежат в reports/<прогон>/checkpoints/.
 reports/*/checkpoints/
 *.pt
 *.pth
 *.ckpt
 
-# python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -41,7 +26,6 @@ venv/
 env/
 .python-version
 
-# инструменты
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -49,7 +33,6 @@ env/
 .coverage
 htmlcov/
 
-# редакторы и ОС
 .vscode/
 .idea/
 .DS_Store
