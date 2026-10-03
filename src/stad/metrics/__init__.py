@@ -12,6 +12,8 @@
 * **Антипримеры (демонстрация инфляции, НЕ для ранжирования):**
   ``pa_f1``, ``pa_inflation_ratio``.
 """
+import numpy as np
+
 from .event_level import (
     DEFAULT_PERSISTENCE,
     alarms_per_hour,
@@ -66,8 +68,38 @@ __all__ = [
     "point_adjust", "pa_f1", "pointwise_report",
     "friedman", "nemenyi_cd", "mean_ranks", "rank_matrix",
     "bootstrap_ci", "paired_bootstrap_test", "variance_decomposition",
-    "PRIMARY_METRICS", "FORBIDDEN_FOR_RANKING",
+    "PRIMARY_METRICS", "FORBIDDEN_FOR_RANKING", "evaluation_view",
 ]
+
+
+def evaluation_view(scores, data, *, reduce: str = "max"):
+    """Привести score и метки к той гранулярности, на которой заданы метки.
+
+    В FT-AED метки **корридор-уровневые**: событие помечено сразу на всех
+    196 узлах, пространственной локализации нет. Оценивать такой датасет
+    поузловым решением неправильно по двум причинам:
+
+    * у каждого события появляется 196 независимых шансов быть задетым
+      шумом, и event-recall случайного score растёт искусственно;
+    * модель, которая корректно зажигает много узлов выше по потоку
+      (именно так и выглядит затор от ДТП), штрафуется как источник
+      множества ложных тревог, тогда как это **одна** тревога.
+
+    Поэтому score сводится по оси узлов (по умолчанию максимумом —
+    инцидент локален, и сеть должна срабатывать по сильнейшему узлу), а
+    метки берутся как есть: они одинаковы для всех узлов.
+
+    Для датасетов с поузловыми метками (синтетический коридор) функция
+    возвращает входные массивы без изменений.
+    """
+    if not data.meta.get("labels_are_corridor_level"):
+        return scores, data.y_test, data.event_id_test
+    agg = {"max": np.max, "mean": np.mean}[reduce]
+    return (
+        agg(scores, axis=1, keepdims=True),
+        data.y_test[:, :1],
+        data.event_id_test[:, :1],
+    )
 
 
 def full_report(
@@ -80,11 +112,12 @@ def full_report(
 ) -> dict[str, float]:
     """Единая точка входа: event-level + поточечные метрики для одного прогона."""
     step_min = float(data.meta.get("step_min", 0.5))
+    s, y, eid = evaluation_view(scores, data)
     ev = event_level_report(
-        scores, data.y_test, data.event_id_test, data.t_test, data.events,
+        s, y, eid, data.t_test, data.events,
         alarm_budget_per_hour=alarm_budget_per_hour,
         half_life_min=half_life_min, step_min=step_min,
         persistence=persistence,
     )
-    pt = pointwise_report(scores, data.y_test, data.event_id_test, threshold=ev["threshold"])
+    pt = pointwise_report(s, y, eid, threshold=ev["threshold"])
     return {**ev, **pt}

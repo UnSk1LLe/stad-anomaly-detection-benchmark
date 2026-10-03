@@ -16,6 +16,7 @@ import pandas as pd
 import yaml
 
 from .data import SplitData, load_dataset
+from .metrics import evaluation_view
 from .metrics.event_level import threshold_at_alarm_rate
 from .registry import REFERENCE, get_grid
 from .report import write_results_md
@@ -117,7 +118,8 @@ def _pr_data(
         if not f.exists():
             continue
         s = np.load(f)
-        precision, recall, _ = precision_recall_curve(data.y_test.ravel(), s.ravel())
+        s, y, _ = evaluation_view(s, data)
+        precision, recall, _ = precision_recall_curve(y.ravel(), s.ravel())
         out[r.label] = (recall, precision)
     return out
 
@@ -155,7 +157,8 @@ def _event_traces(
         f = scores_dir / f"{r.config}__{dataset}__seed{seed}.npy"
         if f.exists():
             s = np.load(f)
-            thr = threshold_at_alarm_rate(s, data.y_test, alarm_budget, step_min,
+            s, y_ev, _ = evaluation_view(s, data)
+            thr = threshold_at_alarm_rate(s, y_ev, alarm_budget, step_min,
                                           persistence=persistence)
             loaded[r.config] = (r.label, s, thr)
     if not loaded:
@@ -166,7 +169,8 @@ def _event_traces(
     for ev in data.events.itertuples():
         hits = []
         for _, (_, s, thr) in loaded.items():
-            mask = (data.event_id_test == ev.event_id) & (s > thr)
+            eid_ev = data.event_id_test[:, : s.shape[1]]
+            mask = (eid_ev == ev.event_id) & (s > thr)
             hits.append(bool(mask.any()))
         spread = len(hits) - abs(sum(hits) * 2 - len(hits))   # максимум при равном делении
         if spread > best_spread:
@@ -185,10 +189,12 @@ def _event_traces(
     for _, (label, s, thr) in loaded.items():
         # нормировка на общий масштаб: score разных механизмов несопоставимы по
         # абсолютной величине, поэтому приводим к [0,1] по нормальной части теста
-        lo = float(np.quantile(s[data.y_test == 0], 0.01))
-        hi = float(np.quantile(s[data.y_test == 0], 0.9999))
+        y_ev = data.y_test[:, : s.shape[1]]
+        lo = float(np.quantile(s[y_ev == 0], 0.01))
+        hi = float(np.quantile(s[y_ev == 0], 0.9999))
         rng = max(hi - lo, 1e-9)
-        agg = s[np.ix_(np.where(sel)[0], nodes)].max(axis=1)
+        cols = nodes if s.shape[1] > 1 else np.array([0])
+        agg = s[np.ix_(np.where(sel)[0], cols)].max(axis=1)
         rows.append(
             pd.DataFrame({
                 "event_id": best_eid,

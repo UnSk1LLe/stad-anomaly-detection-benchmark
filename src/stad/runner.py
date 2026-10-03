@@ -28,7 +28,7 @@ from .budget import match_budget
 from .data.types import SplitData
 from .encoders import ENCODER_LABELS
 from .heads import HEAD_LABELS, HEAD_MECHANISM
-from .metrics import full_report, operating_curve
+from .metrics import evaluation_view, full_report, operating_curve
 from .model import build_detector
 from .registry import Config, GROUP_LABELS
 from .train import TrainConfig, train_detector
@@ -149,8 +149,9 @@ def run_config(
 
     metrics = full_report(scores, data, alarm_budget_per_hour=alarm_budget_per_hour,
                           half_life_min=half_life_min, persistence=persistence)
+    s_eval, y_eval, eid_eval = evaluation_view(scores, data)
     curve = operating_curve(
-        scores, data.y_test, data.event_id_test, data.t_test, data.events,
+        s_eval, y_eval, eid_eval, data.t_test, data.events,
         half_life_min=half_life_min, step_min=float(data.meta.get("step_min", 0.5)),
         persistence=persistence,
     )
