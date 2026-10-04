@@ -184,7 +184,7 @@ def run_study(
                             alarm_budget_per_hour=cfg.alarm_budget_per_hour,
                             half_life_min=cfg.half_life_min,
                             step_min=step_min, persistence=cfg.persistence,
-                            calibration=make_calibration(det.score(data.X_val), data),
+                            calibration=make_calibration(det.score(data.X_calib), data),
                             segments=eval_segments(data),
                         )
                         rows.append({

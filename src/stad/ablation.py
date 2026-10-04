@@ -78,7 +78,7 @@ def ablate_bigan(
                 raise FileNotFoundError(f"нет чекпойнта {ckpt}")
             det, _ = load_detector(ckpt, device=device)
             test = bigan_components(det, data.X_test, device=device)
-            val = bigan_components(det, data.X_val, device=device)
+            calib = bigan_components(det, data.X_calib, device=device)
 
             if check_saved:
                 saved = run_dir / "scores" / f"{config_name}__{ds_name}__seed{seed}.npy"
@@ -92,7 +92,7 @@ def ablate_bigan(
 
             for comp in COMPONENTS:
                 rep = full_report(
-                    test[comp], data, val_scores=val[comp],
+                    test[comp], data, calib_scores=calib[comp],
                     alarm_budget_per_hour=alarm_budget_per_hour, half_life_min=half_life_min,
                     persistence=persistence, reduce=node_reduce,
                 )

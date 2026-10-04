@@ -113,32 +113,35 @@ def eval_segments(data) -> np.ndarray:
     return contiguous_segments(data.t_test)
 
 
-def make_calibration(val_scores, data, *, reduce: str = "max") -> Calibration:
-    """Калибровочная выборка порога из score валидационных окон.
+def make_calibration(calib_scores, data, *, reduce: str = "max") -> Calibration:
+    """Калибровочная выборка порога: score окон ``data.X_calib`` (дни валидации).
 
-    Требует ``data.t_val``: валидационные окна не сплошные (вокруг событий
-    они вырезаны), и подтверждение через разрыв дало бы ложные серии.
-    Если валидации нет, порог не калибруется вовсе — подставлять тест или
-    train нельзя: первое утечка, второе оптимистично смещено.
+    Выборка не сплошная (размеченные окна вырезаны), поэтому нужен
+    ``data.t_calib``: подтверждение через разрыв дало бы ложные серии. Метки
+    теста в калибровке не участвуют. Если выборки нет, порог не калибруется
+    вовсе — подставлять тест или train нельзя: первое утечка, второе
+    оптимистично смещено.
     """
-    if val_scores is None:
+    if calib_scores is None:
         raise ValueError(
-            "нет score валидации: порог калибруется на валидации, а не на тесте "
-            "(CLAUDE.md, правило 3)"
+            "нет score калибровочной выборки: порог калибруется на окнах дней валидации, "
+            "а не на тесте (CLAUDE.md, правило 3)"
         )
-    if getattr(data, "t_val", None) is None:
+    if getattr(data, "t_calib", None) is None:
         raise ValueError(
-            "SplitData.t_val не задан — валидационные окна не привязаны ко времени, "
+            "SplitData.t_calib не задан — калибровочные окна не привязаны ко времени, "
             "калибровка порога невозможна"
         )
-    val_scores = np.asarray(val_scores)
-    if len(val_scores) != len(data.t_val):
-        raise ValueError(f"score валидации {val_scores.shape} не соответствует t_val {data.t_val.shape}")
+    calib_scores = np.asarray(calib_scores)
+    if len(calib_scores) != len(data.t_calib):
+        raise ValueError(
+            f"score калибровки {calib_scores.shape} не соответствует t_calib {data.t_calib.shape}"
+        )
     spacing = window_spacing(data.t_test)
     return Calibration(
-        scores=reduce_scores(val_scores, data, reduce=reduce),
+        scores=reduce_scores(calib_scores, data, reduce=reduce),
         step_min=float(data.meta.get("step_min", 0.5)),
-        segments=contiguous_segments(data.t_val, spacing),
+        segments=contiguous_segments(data.t_calib, spacing),
     )
 
 
@@ -176,7 +179,7 @@ def full_report(
     scores,
     data,
     *,
-    val_scores,
+    calib_scores,
     alarm_budget_per_hour: float = 1.0,
     half_life_min: float = 15.0,
     persistence: int = DEFAULT_PERSISTENCE,
@@ -184,7 +187,7 @@ def full_report(
 ) -> dict[str, float]:
     """Единая точка входа: event-level + поточечные метрики для одного прогона.
 
-    ``val_scores`` обязателен: порог калибруется по нормальным окнам
+    ``calib_scores`` обязателен: порог калибруется по окнам дней
     валидации и переносится на тест без изменений. Подбор порога по
     тестовым меткам запрещён (CLAUDE.md, правило 3).
     """
@@ -195,7 +198,7 @@ def full_report(
         alarm_budget_per_hour=alarm_budget_per_hour,
         half_life_min=half_life_min, step_min=step_min,
         persistence=persistence,
-        calibration=make_calibration(val_scores, data, reduce=reduce),
+        calibration=make_calibration(calib_scores, data, reduce=reduce),
         segments=eval_segments(data),
     )
     pt = pointwise_report(s, y, eid, threshold=ev["threshold"])

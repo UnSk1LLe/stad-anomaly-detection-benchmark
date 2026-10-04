@@ -385,7 +385,18 @@ def load_ft_aed(
 
     keep_tr = np.where(m_tr)[0][drop_anomalous_windows(X[m_tr], y_clean_nodes[m_tr], buffer=clean_buffer)]
     keep_va = np.where(m_va)[0][drop_anomalous_windows(X[m_va], y_clean_nodes[m_va], buffer=clean_buffer)]
-    idx_te = np.where(m_te)[0]
+    # Тест: окна рядом с событиями другого типа не положительные (их метка не
+    # оценивается) и не отрицательные (там реальная аномалия): считать их
+    # нормой значит штрафовать детектор за правильную тревогу. Исключаются из
+    # теста; подтверждение тревоги не пересекает образовавшиеся разрывы.
+    # При label_source="both" y_other нулевой и ничего не меняется.
+    ignored_te = m_te & (y == 0) & (y_other == 1)
+    idx_te = np.where(m_te & ~ignored_te)[0]
+    # Калибровка порога: окна дней валидации без размеченных окон (оцениваемых и
+    # другого типа), буферы вокруг событий НЕ вырезаются — как в нормальной части теста.
+    idx_calib = np.where(m_va & (y == 0) & (y_other == 0))[0]
+    if len(idx_calib) < 64:
+        raise ValueError(f"калибровочная выборка порога мала: {len(idx_calib)} окон")
     if len(keep_tr) < 64:
         raise ValueError(f"в train осталось {len(keep_tr)} окон — уменьшите clean_buffer")
 
@@ -413,6 +424,8 @@ def load_ft_aed(
         # без валидации X_val подменён куском train, и калибровать порог на нём
         # нельзя: t_val=None заставляет калибровку упасть, а не молча сработать
         t_val=t_end[keep_va] if len(keep_va) else None,
+        X_calib=scaler.transform(X[idx_calib]),
+        t_calib=t_end[idx_calib],
         meta={
             "dataset": "FT-AED",
             "source": SOURCE,
@@ -439,6 +452,8 @@ def load_ft_aed(
             "n_test_windows": int(len(idx_te)),
             "dropped_train_windows": int(m_tr.sum() - len(keep_tr)),
             "n_other_events_excluded": int(len(other_events)),
+            "n_test_windows_ignored": int(ignored_te.sum()),
+            "n_calib_windows": int(len(idx_calib)),
             "n_train_anomalous": int(len(anom_tr)),
             "n_val_anomalous": int(len(anom_va)),
             "labels_are_corridor_level": True,

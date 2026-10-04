@@ -154,8 +154,8 @@ def test_ablate_bigan_runs_all_components_with_validation_threshold(trained_biga
     from stad.checkpoints import load_detector
 
     det, _ = load_detector(checkpoint_path(run, "cand_gcngru_bigan", "synthetic", 0))
-    val = bigan_components(det, data.X_val)["combined"]
-    ref = full_report(saved, data, val_scores=val, alarm_budget_per_hour=1.0,
+    calib = bigan_components(det, data.X_calib)["combined"]
+    ref = full_report(saved, data, calib_scores=calib, alarm_budget_per_hour=1.0,
                       half_life_min=15.0, persistence=3)
     got = df.loc[df["component"] == "combined", "padf"].iloc[0]
     assert got == pytest.approx(ref["padf"], abs=1e-6)

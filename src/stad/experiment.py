@@ -167,13 +167,13 @@ def _event_traces(
     loaded: dict[str, tuple[str, np.ndarray, float]] = {}
     for r in cand.itertuples():
         f = scores_dir / f"{r.config}__{dataset}__seed{seed}.npy"
-        f_val = scores_dir / f"{r.config}__{dataset}__seed{seed}__val.npy"
+        f_calib = scores_dir / f"{r.config}__{dataset}__seed{seed}__calib.npy"
         # порог — по валидации; без score валидации трассу не строим, а не
         # подбираем порог по тесту
-        if f.exists() and f_val.exists():
+        if f.exists() and f_calib.exists():
             s, _, _ = evaluation_view(np.load(f), data, reduce=reduce)
             thr = threshold_from_calibration(
-                make_calibration(np.load(f_val), data, reduce=reduce), alarm_budget,
+                make_calibration(np.load(f_calib), data, reduce=reduce), alarm_budget,
                 persistence=persistence,
             )
             loaded[r.config] = (r.label, s, thr)

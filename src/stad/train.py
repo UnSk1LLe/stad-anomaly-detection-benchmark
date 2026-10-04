@@ -66,8 +66,8 @@ class TrainOutcome:
     n_params: int
     history: list[dict[str, float]] = field(default_factory=list)
     extras: dict[str, float] = field(default_factory=dict)
-    #: score на валидационных окнах — для калибровки порога (метки не нужны).
-    val_scores: np.ndarray | None = None
+    #: score калибровочных окон (дни валидации) — для калибровки порога, меток не нужно.
+    calib_scores: np.ndarray | None = None
 
 
 def set_seed(seed: int) -> None:
@@ -267,9 +267,11 @@ def train_detector(
     if scores.shape != data.y_test.shape:
         raise RuntimeError(f"score {scores.shape} != y_test {data.y_test.shape}")
 
-    # валидация скорится тем же детектором: по ней калибруется порог. Меток она
-    # не несёт (аномальных окон в ней по построению нет), тест порогу не нужен.
-    val_scores, _ = _score_windows(detector, data.X_val, cfg, device)
+    # калибровочная выборка (окна дней валидации без размеченных окон) скорится тем
+    # же детектором: по ней калибруется порог. Меток она не несёт, тест порогу не нужен.
+    calib_scores = None
+    if data.X_calib is not None:
+        calib_scores, _ = _score_windows(detector, data.X_calib, cfg, device)
 
     extras: dict[str, float] = {}
     if hasattr(detector.head, "correction_share"):
@@ -289,5 +291,5 @@ def train_detector(
         n_params=detector.n_params,
         history=history,
         extras=extras,
-        val_scores=val_scores,
+        calib_scores=calib_scores,
     )

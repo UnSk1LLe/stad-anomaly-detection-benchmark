@@ -72,6 +72,14 @@ class SplitData:
     #: пересекать разрывы. ``None`` — калибровка порога невозможна.
     t_val: np.ndarray | None = None
 
+    #: КАЛИБРОВОЧНАЯ ВЫБОРКА порога: окна дней валидации, где нет размеченных
+    #: окон оцениваемых событий (и окон событий другого типа). Буферы вокруг
+    #: событий здесь НЕ вырезаются: тестовые «нормальные» окна их содержат, и
+    #: порог по чистой норме давал бы на тесте в разы больше тревог, чем бюджет.
+    #: Меток теста тут нет. ``X_val`` остаётся чистым и служит ранней остановке.
+    X_calib: np.ndarray | None = None
+    t_calib: np.ndarray | None = None
+
     # ------------------------------------------------------------------ utils
     @property
     def n_nodes(self) -> int:
@@ -112,6 +120,13 @@ class SplitData:
             raise ValueError(f"t_test: ожидается ({n_test},), получено {self.t_test.shape}")
         if self.t_val is not None and self.t_val.shape != (self.X_val.shape[0],):
             raise ValueError(f"t_val: ожидается ({self.X_val.shape[0]},), получено {self.t_val.shape}")
+        if (self.X_calib is None) != (self.t_calib is None):
+            raise ValueError("X_calib и t_calib задаются вместе")
+        if self.X_calib is not None:
+            if self.X_calib.ndim != 4 or self.X_calib.shape[1:] != self.X_train.shape[1:]:
+                raise ValueError(f"X_calib: форма {self.X_calib.shape} несовместима с X_train")
+            if self.t_calib.shape != (self.X_calib.shape[0],):
+                raise ValueError(f"t_calib: ожидается ({self.X_calib.shape[0]},), получено {self.t_calib.shape}")
         if self.A.shape != (self.n_nodes, self.n_nodes):
             raise ValueError(f"A: ожидается {(self.n_nodes, self.n_nodes)}")
         if len(self.feature_names) != self.n_features:

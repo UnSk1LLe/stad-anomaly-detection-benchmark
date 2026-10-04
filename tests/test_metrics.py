@@ -336,11 +336,11 @@ def test_calibration_requires_validation_scores():
     d = make_synthetic_corridor(stations=5, lanes=3, days=2, step_min=1.0,
                                 n_events=6, window=8, seed=1)
     scores = np.zeros(d.y_test.shape, dtype=np.float32)
-    with pytest.raises(ValueError, match="калибруется на валидации"):
-        full_report(scores, d, val_scores=None)
-    with pytest.raises(ValueError, match="t_val"):
-        make_calibration(np.zeros((len(d.X_val), d.n_nodes)),
-                         dataclasses.replace(d, t_val=None))
+    with pytest.raises(ValueError, match="калибруется на окнах дней валидации"):
+        full_report(scores, d, calib_scores=None)
+    with pytest.raises(ValueError, match="t_calib"):
+        make_calibration(np.zeros((len(d.X_calib), d.n_nodes)),
+                         dataclasses.replace(d, t_calib=None, X_calib=None))
 
 
 @pytest.mark.parametrize("reduce", ["max", "q99", "q95", "mean"])

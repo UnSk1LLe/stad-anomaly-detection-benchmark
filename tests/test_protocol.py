@@ -22,19 +22,21 @@ def data():
                                    n_events=8, window=8, seed=2)
 
 
-def test_validation_windows_are_timestamped(data):
-    """Валидация привязана ко времени и лежит строго до теста (rolling origin)."""
-    assert data.t_val is not None and len(data.t_val) == len(data.X_val)
-    assert data.t_val.max() < data.t_test.min()
+def test_calibration_windows_are_timestamped(data):
+    """Калибровочная выборка привязана ко времени и лежит строго до теста (rolling origin)."""
+    assert data.t_calib is not None and len(data.t_calib) == len(data.X_calib)
+    assert data.t_calib.max() < data.t_test.min()
+    # буферы вокруг событий не вырезаются, поэтому выборка не меньше чистой валидации
+    assert len(data.X_calib) >= len(data.X_val)
 
 
-def test_random_scorer_validation_stream_independent(data):
+def test_random_scorer_calibration_stream_independent(data):
     """Score случайного контроля на валидации не должен быть началом тестового ряда."""
     sc = RandomScorer(seed=0)
-    test, val = sc.score(data), sc.score_val(data)
-    assert val.shape == (len(data.X_val), data.n_nodes)
-    n = min(len(test), len(val))
-    assert not np.allclose(test[:n], val[:n])
+    test, calib = sc.score(data), sc.score_calib(data)
+    assert calib.shape == (len(data.X_calib), data.n_nodes)
+    n = min(len(test), len(calib))
+    assert not np.allclose(test[:n], calib[:n])
 
 
 def test_pipeline_threshold_ignores_test_labels(data):
@@ -42,7 +44,7 @@ def test_pipeline_threshold_ignores_test_labels(data):
     cfg = Config(name="b_snd", group="baseline", baseline="snd", rationale="тест")
     kw = dict(seed=0, dataset_name="d", train_cfg=TrainConfig(), param_budget=1000,
               alarm_budget_per_hour=1.0)
-    row, _, _, _, val_scores = run_config(cfg, data, **kw)
+    row, _, _, _, calib_scores = run_config(cfg, data, **kw)
 
     perm = np.random.default_rng(0).permutation(len(data.y_test))
     shuffled = dataclasses.replace(data, y_test=data.y_test[perm],
@@ -51,19 +53,19 @@ def test_pipeline_threshold_ignores_test_labels(data):
 
     assert row["threshold_source"] == "validation"
     assert row["threshold"] == row2["threshold"]
-    assert val_scores.shape == (len(data.X_val), data.n_nodes)
+    assert calib_scores.shape == (len(data.X_calib), data.n_nodes)
 
 
-def test_trained_detector_returns_validation_scores(data):
+def test_trained_detector_returns_calibration_scores(data):
     from stad.model import build_detector
     from stad.train import train_detector
 
     det = build_detector("gcn_gru", "recon", hidden=8, n_features=data.n_features,
                          n_nodes=data.n_nodes, window=data.window)
     out = train_detector(det, data, TrainConfig(epochs=1, batch_size=64, device="cpu"), seed=0)
-    assert out.val_scores is not None
-    assert out.val_scores.shape == (len(data.X_val), data.n_nodes)
-    assert np.isfinite(out.val_scores).all()
+    assert out.calib_scores is not None
+    assert out.calib_scores.shape == (len(data.X_calib), data.n_nodes)
+    assert np.isfinite(out.calib_scores).all()
 
 
 # ------------------------------------------------- предзарегистрированное подмножество

@@ -99,6 +99,7 @@ def build_split(
         )
 
     scaler = Standardizer().fit(X[keep_tr])
+    calib_idx = idx_va[~y[idx_va].any(axis=1)]
 
     # событийные времена — в ту же шкалу минут, что t_end
     ev = events.copy()
@@ -124,6 +125,10 @@ def build_split(
         A=A.astype(np.float32),
         feature_names=list(feature_names),
         t_val=t_end[keep_va].astype(np.float64) if len(keep_va) else None,
+        # поузловые метки: калибровочная выборка — окна периода валидации без
+        # положительных узлов; буферы вокруг событий не вырезаются
+        X_calib=scaler.transform(X[calib_idx]) if len(calib_idx) else None,
+        t_calib=t_end[calib_idx].astype(np.float64) if len(calib_idx) else None,
         meta={
             **(meta or {}),
             "n_train_windows": int(len(keep_tr)),

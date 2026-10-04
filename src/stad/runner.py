@@ -6,7 +6,7 @@
 * операционная кривая в ``curves.csv``;
 * сырые score в ``scores/<config>__<dataset>__seed<k>.npy`` — чтобы
   фигуры и статистику можно было пересчитать без повторного обучения;
-* score валидации там же, с суффиксом ``__val.npy``: порог калибруется по
+* score калибровочной выборки там же, с суффиксом ``__calib.npy``: порог калибруется по
   ним, а не по тесту, и без них порог не пересчитать;
 * таблица подбора бюджета в ``budget.csv``.
 
@@ -148,7 +148,7 @@ def run_config(
         outcome = train_detector(
             detector, data, train_cfg, seed=seed, randomize_only=cfg.randomize_only
         )
-        scores, val_scores = outcome.scores, outcome.val_scores
+        scores, calib_scores = outcome.scores, outcome.calib_scores
 
         # веса сохраняются вместе с рецептом сборки: hidden подбирается на
         # лету под бюджет параметров, и без рецепта чекпойнт не восстановить
@@ -198,7 +198,7 @@ def run_config(
         fit_s = time.perf_counter() - t0
         t1 = time.perf_counter()
         scores = np.asarray(model.score(data), dtype=np.float32)
-        val_scores = np.asarray(model.score_val(data), dtype=np.float32)
+        calib_scores = np.asarray(model.score_calib(data), dtype=np.float32)
         inf_s = time.perf_counter() - t1
         runtime = {
             "n_params": int(getattr(model, "n_params", 0)),
@@ -211,7 +211,7 @@ def run_config(
             "uses_graph": cfg.baseline == "california",
         }
 
-    metrics = full_report(scores, data, val_scores=val_scores,
+    metrics = full_report(scores, data, calib_scores=calib_scores,
                           alarm_budget_per_hour=alarm_budget_per_hour,
                           half_life_min=half_life_min, persistence=persistence,
                           reduce=node_reduce)
@@ -220,7 +220,7 @@ def run_config(
         s_eval, y_eval, eid_eval, data.t_test, data.events,
         half_life_min=half_life_min, step_min=float(data.meta.get("step_min", 0.5)),
         persistence=persistence,
-        calibration=make_calibration(val_scores, data, reduce=node_reduce),
+        calibration=make_calibration(calib_scores, data, reduce=node_reduce),
         segments=eval_segments(data),
     )
 
@@ -243,7 +243,7 @@ def run_config(
         **metrics,
     }
     curve = curve.assign(config=cfg.name, label=cfg.label, dataset=dataset_name, seed=seed)
-    return row, curve, scores, budget_row, val_scores
+    return row, curve, scores, budget_row, calib_scores
 
 
 def _eta_text(t_grid: float, remaining: list[Config], cells: list[tuple[str, float]],
@@ -307,7 +307,7 @@ def run_grid(
                     print(f"{tag}  обучение…", flush=True)
                 t_cell = time.perf_counter()
                 try:
-                    row, curve, scores, budget, val_scores = run_config(
+                    row, curve, scores, budget, calib_scores = run_config(
                         cfg, data, seed=seed, dataset_name=ds_name,
                         train_cfg=train_cfg, param_budget=param_budget,
                         alarm_budget_per_hour=alarm_budget_per_hour,
@@ -322,8 +322,8 @@ def run_grid(
                     if save_scores:
                         np.save(out_dir / "scores" / f"{cfg.name}__{ds_name}__seed{seed}.npy", scores)
                         # score валидации — чтобы пересчитывать порог без переобучения
-                        np.save(out_dir / "scores" / f"{cfg.name}__{ds_name}__seed{seed}__val.npy",
-                                val_scores)
+                        np.save(out_dir / "scores" / f"{cfg.name}__{ds_name}__seed{seed}__calib.npy",
+                                calib_scores)
                     if verbose:
                         cell_seconds.append((cfg.name, time.perf_counter() - t_cell))
                         print(

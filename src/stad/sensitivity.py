@@ -6,7 +6,7 @@
 2. **Окно меток** ``lead/trail`` вокруг отметки официального отчёта. Оно задаёт
    долю положительных окон (prevalence) и потому AP и все event-level метрики.
 
-Обе проверки работают на сохранённых score (``scores/*.npy`` и ``*__val.npy``) и
+Обе проверки работают на сохранённых score (``scores/*.npy`` и ``*__calib.npy``) и
 не переобучают модели. Честная оговорка про окно меток: модели обучены с очисткой
 по окну 15/20, а пересчитывается только оценка; это чувствительность ОЦЕНКИ к
 разметке, а не обучения.
@@ -80,10 +80,10 @@ def relabel_test(data: SplitData, lead_min: float, trail_min: float) -> SplitDat
 # -------------------------------------------------------------------- пересчёт
 def _load(scores_dir: Path, config: str, dataset: str, seed: int):
     base = scores_dir / f"{config}__{dataset}__seed{seed}"
-    f_test, f_val = Path(f"{base}.npy"), Path(f"{base}__val.npy")
-    if not (f_test.exists() and f_val.exists()):
+    f_test, f_calib = Path(f"{base}.npy"), Path(f"{base}__calib.npy")
+    if not (f_test.exists() and f_calib.exists()):
         return None
-    return np.load(f_test), np.load(f_val)
+    return np.load(f_test), np.load(f_calib)
 
 
 def evaluate_saved(
@@ -110,9 +110,9 @@ def evaluate_saved(
                 if got is None:
                     missing.append(f"{config}__{ds_name}__seed{seed}")
                     continue
-                s_test, s_val = got
+                s_test, s_calib = got
                 rep = full_report(
-                    s_test, d, val_scores=s_val, alarm_budget_per_hour=alarm_budget_per_hour,
+                    s_test, d, calib_scores=s_calib, alarm_budget_per_hour=alarm_budget_per_hour,
                     half_life_min=half_life_min, persistence=persistence, reduce=reduce,
                 )
                 rows.append({
