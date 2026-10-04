@@ -533,10 +533,11 @@ def write_results_md(
         + "\n"
     )
     cols = ["label", "group_label", "mean_rank", "padf", "padf_std", "event_recall",
-            "median_delay_min", "average_precision", "ap_lift", "fpr_observed",
-            "n_params", "inference_ms"]
+            "median_delay_min", "average_precision", "ap_lift", "alarms_per_hour",
+            "fpr_observed", "n_params", "inference_ms"]
     head = ["Конфигурация", "Группа", "Ранг (PRIMARY)", "padf", "±", "event-recall",
-            "задержка, мин", "AP", "AP/случайный", "факт. FPR", "параметров", "мс/окно"]
+            "задержка, мин", "AP", "AP/случайный", "тревог/ч (факт.)", "факт. FPR",
+            "параметров", "мс/окно"]
     L.append("| " + " | ".join(head) + " |")
     L.append("|" + "---|" * len(head))
     for _, r in table.iterrows():
@@ -546,10 +547,20 @@ def write_results_md(
             f"| {r['label']} | {r['group_label']} | {f(r['mean_rank'], '.2f')} | "
             f"{f(r['padf'])} | {f(r['padf_std'])} | {f(r['event_recall'])} | "
             f"{f(r['median_delay_min'], '+.1f')} | {f(r['average_precision'], '.4f')} | "
-            f"{f(r['ap_lift'], '.1f')}× | {f(r['fpr_observed'], '.4f')} | "
+            f"{f(r['ap_lift'], '.1f')}× | {f(r['alarms_per_hour'], '.2f')} | "
+            f"{f(r['fpr_observed'], '.4f')} | "
             f"{int(r['n_params']) if np.isfinite(r['n_params']) else '—'} | "
             f"{f(r['inference_ms'], '.2f')} |"
         )
+    L.append(
+        f"\n**Реальная частота ложных тревог.** Порог калибруется по окнам дней валидации на "
+        f"номинальный бюджет ({manifest.get('alarm_budget_per_hour', 1.0)}/ч), а на тесте реальная "
+        f"частота (колонка «тревог/ч») от него отличается и разная у разных моделей: сдвиг "
+        f"распределения между днями и малая калибровочная выборка. Поэтому `padf` сравнивается "
+        f"при равном НОМИНАЛЬНОМ, а не равном реальном бюджете; модели с большей реальной "
+        f"частотой тревог получают преимущество в recall. Читать `padf` вместе с этой колонкой "
+        f"и операционными кривыми (фигура 02).\n"
+    )
     L.append(
         "\n`PA-F1` сознательно **не** включён в таблицу ранжирования: он непригоден для "
         "сравнения моделей. Его значения и коэффициент инфляции — на фигуре 05 "
