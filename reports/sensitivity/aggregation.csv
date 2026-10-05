@@ -1,0 +1,5 @@
+reduce,random_padf,n_trained,n_beaten_by_random,random_below_all_trained,random_rank,trained_mean_padf,trained_max_padf,beaten_configs
+max,0.093330863614264,10,1,False,11,0.21101634344981995,0.3326704507850692,cand_gcngru_physics
+q99,0.0,10,0,True,12,0.229731119165979,0.29525890908555935,
+q95,0.1397947167930774,10,1,False,11,0.21413292720451227,0.3068941136804328,base_snd
+mean,0.15350855870616273,10,3,False,9,0.19909720178933096,0.3044201882100444,"base_snd, cand_gcngru_bigan, cand_gcngru_physics"

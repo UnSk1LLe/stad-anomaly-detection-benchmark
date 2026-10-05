@@ -1,7 +1,20 @@
 /data/
 !/data/.gitkeep
 
-reports/
+/reports/*/checkpoints/
+/reports/*/scores/
+/reports/*/figures/
+/reports/figures/*
+/reports/tables/*
+!/reports/figures/.gitkeep
+!/reports/tables/.gitkeep
+/reports/agent_audit.jsonl
+
+*.pt
+*.pth
+*.ckpt
+*.npy
+*.npz
 
 __pycache__/
 *.py[cod]

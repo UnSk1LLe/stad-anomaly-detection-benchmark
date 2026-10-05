@@ -1,0 +1,63 @@
+{
+  "name": "ft_aed_cv",
+  "grid": "core",
+  "seeds": [
+    0
+  ],
+  "param_budget": 150000,
+  "alarm_budget_per_hour": 0.25,
+  "half_life_min": 15.0,
+  "persistence": 3,
+  "node_reduce": "max",
+  "primary_metric": "padf",
+  "save_checkpoints": true,
+  "out_dir": "reports\\ft_aed_cv_prelim2",
+  "datasets": {
+    "fold0": {
+      "loader": "ft-aed",
+      "from_file": "configs/data/ft_aed.yaml",
+      "kwargs": {
+        "fold": 0,
+        "n_folds": 4,
+        "fold_test_days": 3
+      }
+    },
+    "fold1": {
+      "loader": "ft-aed",
+      "from_file": "configs/data/ft_aed.yaml",
+      "kwargs": {
+        "fold": 1,
+        "n_folds": 4,
+        "fold_test_days": 3
+      }
+    },
+    "fold2": {
+      "loader": "ft-aed",
+      "from_file": "configs/data/ft_aed.yaml",
+      "kwargs": {
+        "fold": 2,
+        "n_folds": 4,
+        "fold_test_days": 3
+      }
+    },
+    "fold3": {
+      "loader": "ft-aed",
+      "from_file": "configs/data/ft_aed.yaml",
+      "kwargs": {
+        "fold": 3,
+        "n_folds": 4,
+        "fold_test_days": 3
+      }
+    }
+  },
+  "train": {
+    "epochs": 40,
+    "batch_size": 64,
+    "lr": 0.001,
+    "weight_decay": 1e-05,
+    "grad_clip": 1.0,
+    "patience": 8,
+    "d_steps": 1,
+    "device": "cuda"
+  }
+}

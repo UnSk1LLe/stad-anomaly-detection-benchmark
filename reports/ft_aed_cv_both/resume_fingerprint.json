@@ -1,0 +1,154 @@
+{
+  "param_budget": 150000,
+  "train": {
+    "epochs": 40,
+    "batch_size": 64,
+    "lr": 0.001,
+    "weight_decay": 1e-05,
+    "grad_clip": 1.0,
+    "patience": 8,
+    "d_steps": 1
+  },
+  "configs": [
+    "ctrl_random",
+    "ctrl_untrained",
+    "base_pca",
+    "base_california",
+    "base_snd",
+    "base_iforest",
+    "deep_transformer_contrastive",
+    "cand_gcngru_recon",
+    "cand_gatlstm_recon",
+    "cand_gcngru_bigan",
+    "cand_hypergraph_flow",
+    "cand_gcngru_physics"
+  ],
+  "datasets": {
+    "fold0": {
+      "label_source": "both",
+      "step_min": 1.0,
+      "window": 16,
+      "n_train_windows": 1980,
+      "n_calib_windows": 722,
+      "n_test_windows": 1395,
+      "days_train": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        8
+      ],
+      "days_val": [
+        9,
+        10
+      ],
+      "days_test": [
+        11,
+        12,
+        15
+      ],
+      "lead_min": 15.0,
+      "trail_min": 20.0
+    },
+    "fold1": {
+      "label_source": "both",
+      "step_min": 1.0,
+      "window": 16,
+      "n_train_windows": 2843,
+      "n_calib_windows": 622,
+      "n_test_windows": 1395,
+      "days_train": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        10,
+        11
+      ],
+      "days_val": [
+        12,
+        15
+      ],
+      "days_test": [
+        16,
+        17,
+        18
+      ],
+      "lead_min": 15.0,
+      "trail_min": 20.0
+    },
+    "fold2": {
+      "label_source": "both",
+      "step_min": 1.0,
+      "window": 16,
+      "n_train_windows": 3570,
+      "n_calib_windows": 714,
+      "n_test_windows": 1395,
+      "days_train": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        10,
+        11,
+        12,
+        15,
+        16
+      ],
+      "days_val": [
+        17,
+        18
+      ],
+      "days_test": [
+        19,
+        22,
+        23
+      ],
+      "lead_min": 15.0,
+      "trail_min": 20.0
+    },
+    "fold3": {
+      "label_source": "both",
+      "step_min": 1.0,
+      "window": 16,
+      "n_train_windows": 4453,
+      "n_calib_windows": 587,
+      "n_test_windows": 1395,
+      "days_train": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        8,
+        9,
+        10,
+        11,
+        12,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "days_val": [
+        22,
+        23
+      ],
+      "days_test": [
+        24,
+        25,
+        26
+      ],
+      "lead_min": 15.0,
+      "trail_min": 20.0
+    }
+  }
+}

@@ -1,0 +1,4 @@
+lead_min,trail_min,prevalence,n_events_mean,spearman_vs_base,top3,random_beats_n_trained
+10.0,10.0,0.12795698924731183,8.75,0.8671328671328673,"deep_transformer_contrastive, base_california, base_iforest",0
+15.0,20.0,0.20179211469534053,8.75,1.0,"base_snd, base_california, deep_transformer_contrastive",0
+20.0,30.0,0.2648745519713262,8.75,0.965034965034965,"base_snd, base_pca, deep_transformer_contrastive",0
