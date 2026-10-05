@@ -1,19 +1,7 @@
 /data/
 !/data/.gitkeep
 
-reports
-
-!reports/*/RESULTS.md
-!reports/*/runs.csv
-!reports/*/curves.csv
-!reports/*/budget.csv
-!reports/*/manifest.json
-!reports/*/tables/*.csv
-
-reports/*/checkpoints/
-*.pt
-*.pth
-*.ckpt
+reports/
 
 __pycache__/
 *.py[cod]

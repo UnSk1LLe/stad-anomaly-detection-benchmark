@@ -1,0 +1,60 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make test)",
+      "Bash(make smoke)",
+      "Bash(make figures)",
+      "Bash(make data)",
+      "Bash(make lint)",
+      "Bash(python scripts/*)",
+      "Bash(python -m pytest*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "ask": [
+      "Bash(make ft-aed*)",
+      "Bash(make augmentation)",
+      "Bash(make synthetic)",
+      "Bash(git push:*)"
+    ],
+    "deny": [
+      "Write(./reports/**)",
+      "Edit(./reports/**)",
+      "Write(./data/**)",
+      "Edit(./data/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard_protocol.py"],
+            "timeout": 30,
+            "statusMessage": "Проверка протокольного контура"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "code-surgeon",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -m pytest tests -q",
+            "timeout": 900,
+            "statusMessage": "Тесты после правки"
+          }
+        ]
+      }
+    ]
+  }
+}
