@@ -25,10 +25,11 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import torch
 
 from .baselines import build_baseline
 from .budget import match_budget
-from .checkpoints import checkpoint_path, save_detector
+from .checkpoints import checkpoint_path, describe, load_detector, save_detector
 from .data.types import SplitData
 from .encoders import ENCODER_LABELS
 from .heads import HEAD_LABELS, HEAD_MECHANISM
@@ -95,6 +96,167 @@ def estimate_remaining(
     return total
 
 
+def _build_recipe(cfg: Config, data: SplitData, param_budget: int):
+    """``(encoder_kwargs, head_kwargs, результат подбора бюджета)`` для обучаемой конфигурации."""
+    head_kwargs = dict(cfg.head_kwargs)
+    enc_kwargs = dict(cfg.encoder_kwargs)
+    # физической голове нужно знать число полос и индексы признаков
+    if cfg.head == "physics":
+        head_kwargs.setdefault("lanes", int(data.meta.get("lanes", 3)))
+        for key, feat in (("occ_idx", "occupancy"), ("vol_idx", "volume")):
+            if feat in data.feature_names:
+                head_kwargs.setdefault(key, data.feature_names.index(feat))
+    if cfg.encoder == "hypergraph":
+        enc_kwargs.setdefault("n_lanes", int(data.meta.get("lanes", 3)))
+
+    br = match_budget(
+        cfg.encoder, cfg.head,
+        target=param_budget,
+        n_features=data.n_features, n_nodes=data.n_nodes, window=data.window,
+        encoder_kwargs=enc_kwargs, head_kwargs=head_kwargs,
+    )
+    return enc_kwargs, head_kwargs, br
+
+
+def _budget_row(cfg: Config, dataset_name: str, br) -> dict:
+    row = {"config": cfg.name, "dataset": dataset_name, **asdict(br), "deviation": br.deviation}
+    row.pop("tried", None)
+    return row
+
+
+def _finalize(
+    cfg: Config, data: SplitData, scores: np.ndarray, calib_scores: np.ndarray, runtime: dict,
+    *, seed: int, dataset_name: str, alarm_budget_per_hour: float, half_life_min: float,
+    persistence: int, node_reduce: str,
+) -> tuple[dict, pd.DataFrame]:
+    """Метрики, операционная кривая и строка ``runs.csv`` по готовым score."""
+    metrics = full_report(scores, data, calib_scores=calib_scores,
+                          alarm_budget_per_hour=alarm_budget_per_hour,
+                          half_life_min=half_life_min, persistence=persistence,
+                          reduce=node_reduce)
+    s_eval, y_eval, eid_eval = evaluation_view(scores, data, reduce=node_reduce)
+    curve = operating_curve(
+        s_eval, y_eval, eid_eval, data.t_test, data.events,
+        half_life_min=half_life_min, step_min=float(data.meta.get("step_min", 0.5)),
+        persistence=persistence,
+        calibration=make_calibration(calib_scores, data, reduce=node_reduce),
+        segments=eval_segments(data),
+    )
+    row = {
+        "config": cfg.name,
+        "label": cfg.label,
+        "group": cfg.group,
+        "group_label": GROUP_LABELS.get(cfg.group, cfg.group),
+        "encoder": cfg.encoder,
+        "head": cfg.head,
+        "encoder_label": ENCODER_LABELS.get(cfg.encoder) if cfg.encoder else None,
+        "head_label": HEAD_LABELS.get(cfg.head) if cfg.head else None,
+        "mechanism": HEAD_MECHANISM.get(cfg.head) if cfg.head else "none",
+        "baseline": cfg.baseline,
+        "dataset": dataset_name,
+        "seed": seed,
+        "block": f"{dataset_name}|s{seed}",
+        "rationale": cfg.rationale,
+        **runtime,
+        **metrics,
+    }
+    curve = curve.assign(config=cfg.name, label=cfg.label, dataset=dataset_name, seed=seed)
+    return row, curve
+
+
+def resume_cell(
+    cfg: Config,
+    data: SplitData,
+    *,
+    seed: int,
+    dataset_name: str,
+    out_dir: str | Path,
+    train_cfg: TrainConfig,
+    param_budget: int,
+    alarm_budget_per_hour: float = 1.0,
+    half_life_min: float = 15.0,
+    persistence: int = 3,
+    node_reduce: str = "max",
+) -> tuple[dict, pd.DataFrame, np.ndarray, dict | None, np.ndarray] | None:
+    """Восстановить готовую клетку из сохранённых score и чекпойнта, не переобучая.
+
+    Только для обучаемых конфигураций с чекпойнтом (бейзлайны и необученный
+    контроль дёшевы и пересчитываются заново). Возвращает ``None``, если
+    клетку восстановить нельзя: тогда она обучается как обычно. Проверки
+    против подхвата чужих файлов: формы score, ``hidden`` чекпойнта равен
+    подобранному под ТЕКУЩИЙ бюджет, совпадают энкодер, голова, датасет и сид.
+
+    Метрики пересчитываются по тем же score теми же функциями, что и при
+    обычном прогоне, поэтому совпадают с ними. Не восстанавливаются время
+    обучения и вывода (NaN); в строке ``resumed=True``.
+    """
+    if not cfg.is_trainable or cfg.randomize_only:
+        return None
+    out_dir = Path(out_dir)
+    base = out_dir / "scores" / f"{cfg.name}__{dataset_name}__seed{seed}"
+    f_test, f_calib = Path(f"{base}.npy"), Path(f"{base}__calib.npy")
+    ckpt = checkpoint_path(out_dir, cfg.name, dataset_name, seed)
+    if not (f_test.exists() and f_calib.exists() and ckpt.exists()):
+        return None
+    scores, calib_scores = np.load(f_test), np.load(f_calib)
+    if data.X_calib is None or scores.shape != data.y_test.shape \
+            or calib_scores.shape != (len(data.X_calib), data.n_nodes):
+        return None
+
+    enc_kwargs, head_kwargs, br = _build_recipe(cfg, data, param_budget)
+    info = describe(ckpt)
+    if (info.get("hidden") != br.hidden or info.get("encoder") != cfg.encoder
+            or info.get("head") != cfg.head or info.get("config") != cfg.name
+            or info.get("dataset") != dataset_name or info.get("seed") != seed):
+        return None
+
+    detector, _ = load_detector(ckpt)
+    extras: dict[str, float] = {}
+    if hasattr(detector.head, "correction_share"):
+        with torch.no_grad():
+            xb = torch.from_numpy(data.X_test[: train_cfg.batch_size])
+            x_enc, x_tgt = detector._split(xb)
+            extras["physics_correction_share"] = float(
+                detector.head.correction_share(detector.encoder(x_enc), x_tgt)
+            )
+    runtime = {
+        "n_params": detector.n_params,
+        "hidden": br.hidden,
+        "budget_within_tolerance": br.within_tolerance,
+        "epochs_run": info.get("epochs_run", np.nan),
+        "train_seconds": np.nan,
+        "inference_ms_per_window": np.nan,
+        "best_val_loss": info.get("best_val_loss", np.nan),
+        "uses_graph": bool(detector.uses_graph),
+        "resumed": True,
+        **extras,
+    }
+    row, curve = _finalize(
+        cfg, data, scores, calib_scores, runtime, seed=seed, dataset_name=dataset_name,
+        alarm_budget_per_hour=alarm_budget_per_hour, half_life_min=half_life_min,
+        persistence=persistence, node_reduce=node_reduce,
+    )
+    return row, curve, scores, _budget_row(cfg, dataset_name, br), calib_scores
+
+
+def run_fingerprint(
+    configs: tuple[Config, ...], datasets: dict[str, SplitData], train_cfg: TrainConfig,
+    param_budget: int,
+) -> dict:
+    """Что должно совпадать, чтобы готовые клетки одного каталога были сравнимы с новыми."""
+    tc = asdict(train_cfg)
+    for k in ("device", "num_workers", "log_every", "progress"):
+        tc.pop(k, None)
+    keys = ("label_source", "step_min", "window", "n_train_windows", "n_calib_windows",
+            "n_test_windows", "days_train", "days_val", "days_test", "lead_min", "trail_min")
+    return json.loads(json.dumps({
+        "param_budget": param_budget,
+        "train": tc,
+        "configs": [c.name for c in configs],
+        "datasets": {n: {k: d.meta.get(k) for k in keys} for n, d in datasets.items()},
+    }, default=str))
+
+
 def run_config(
     cfg: Config,
     data: SplitData,
@@ -117,28 +279,8 @@ def run_config(
     budget_row: dict | None = None
 
     if cfg.is_trainable:
-        head_kwargs = dict(cfg.head_kwargs)
-        enc_kwargs = dict(cfg.encoder_kwargs)
-        # физической голове нужно знать число полос и индексы признаков
-        if cfg.head == "physics":
-            head_kwargs.setdefault("lanes", int(data.meta.get("lanes", 3)))
-            for key, feat in (("occ_idx", "occupancy"), ("vol_idx", "volume")):
-                if feat in data.feature_names:
-                    head_kwargs.setdefault(key, data.feature_names.index(feat))
-        if cfg.encoder == "hypergraph":
-            enc_kwargs.setdefault("n_lanes", int(data.meta.get("lanes", 3)))
-
-        br = match_budget(
-            cfg.encoder, cfg.head,
-            target=param_budget,
-            n_features=data.n_features, n_nodes=data.n_nodes, window=data.window,
-            encoder_kwargs=enc_kwargs, head_kwargs=head_kwargs,
-        )
-        budget_row = {
-            "config": cfg.name, "dataset": dataset_name, **asdict(br),
-            "deviation": br.deviation,
-        }
-        budget_row.pop("tried", None)
+        enc_kwargs, head_kwargs, br = _build_recipe(cfg, data, param_budget)
+        budget_row = _budget_row(cfg, dataset_name, br)
 
         detector = build_detector(
             cfg.encoder, cfg.head, hidden=br.hidden,
@@ -179,6 +321,7 @@ def run_config(
             "inference_ms_per_window": outcome.inference_ms_per_window,
             "best_val_loss": outcome.best_val_loss,
             "uses_graph": bool(detector.uses_graph),
+            "resumed": False,
             **outcome.extras,
         }
     else:
@@ -209,40 +352,14 @@ def run_config(
             "inference_ms_per_window": 1000.0 * inf_s / max(1, len(data.X_test)),
             "best_val_loss": np.nan,
             "uses_graph": cfg.baseline == "california",
+            "resumed": False,
         }
 
-    metrics = full_report(scores, data, calib_scores=calib_scores,
-                          alarm_budget_per_hour=alarm_budget_per_hour,
-                          half_life_min=half_life_min, persistence=persistence,
-                          reduce=node_reduce)
-    s_eval, y_eval, eid_eval = evaluation_view(scores, data, reduce=node_reduce)
-    curve = operating_curve(
-        s_eval, y_eval, eid_eval, data.t_test, data.events,
-        half_life_min=half_life_min, step_min=float(data.meta.get("step_min", 0.5)),
-        persistence=persistence,
-        calibration=make_calibration(calib_scores, data, reduce=node_reduce),
-        segments=eval_segments(data),
+    row, curve = _finalize(
+        cfg, data, scores, calib_scores, runtime, seed=seed, dataset_name=dataset_name,
+        alarm_budget_per_hour=alarm_budget_per_hour, half_life_min=half_life_min,
+        persistence=persistence, node_reduce=node_reduce,
     )
-
-    row = {
-        "config": cfg.name,
-        "label": cfg.label,
-        "group": cfg.group,
-        "group_label": GROUP_LABELS.get(cfg.group, cfg.group),
-        "encoder": cfg.encoder,
-        "head": cfg.head,
-        "encoder_label": ENCODER_LABELS.get(cfg.encoder) if cfg.encoder else None,
-        "head_label": HEAD_LABELS.get(cfg.head) if cfg.head else None,
-        "mechanism": HEAD_MECHANISM.get(cfg.head) if cfg.head else "none",
-        "baseline": cfg.baseline,
-        "dataset": dataset_name,
-        "seed": seed,
-        "block": f"{dataset_name}|s{seed}",
-        "rationale": cfg.rationale,
-        **runtime,
-        **metrics,
-    }
-    curve = curve.assign(config=cfg.name, label=cfg.label, dataset=dataset_name, seed=seed)
     return row, curve, scores, budget_row, calib_scores
 
 
@@ -275,6 +392,7 @@ def run_grid(
     save_checkpoints: bool = True,
     save_scores: bool = True,
     verbose: bool = True,
+    resume: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Прогнать всю сетку и сохранить артефакты.
 
@@ -282,10 +400,34 @@ def run_grid(
     внутри блока все методы видели **одни и те же** данные и одну и ту
     же инициализацию генератора: иначе блоковая структура теста
     Фридмана нарушается.
+
+    ``resume``: готовые клетки (score теста и калибровки + чекпойнт) восстанавливаются
+    из ``out_dir`` без переобучения (:func:`resume_cell`). Прогон по часам, и
+    аварийная перезагрузка не должна стоить всей сетки. Каталог должен
+    принадлежать прогону с той же конфигурацией: отпечаток
+    ``resume_fingerprint.json`` сверяется, расхождение — ошибка.
     """
     train_cfg = train_cfg or TrainConfig()
     out_dir = Path(out_dir)
     (out_dir / "scores").mkdir(parents=True, exist_ok=True)
+
+    fp = run_fingerprint(configs, datasets, train_cfg, param_budget)
+    fp_path = out_dir / "resume_fingerprint.json"
+    if resume:
+        if fp_path.exists():
+            old = json.loads(fp_path.read_text(encoding="utf-8"))
+            if old != fp:
+                diff = sorted(k for k in set(fp) | set(old) if fp.get(k) != old.get(k))
+                raise RuntimeError(
+                    f"возобновление отклонено: конфигурация прогона изменилась ({', '.join(diff)}). "
+                    f"Готовые клетки в {out_dir} несопоставимы с новыми; используйте другой --out-dir."
+                )
+        elif verbose:
+            print("ВНИМАНИЕ: отпечатка конфигурации в каталоге нет (прогон начат до его введения); "
+                  "готовые клетки принимаются на доверии, проверяются только hidden и формы score.",
+                  flush=True)
+    fp_path.write_text(json.dumps(fp, indent=2, ensure_ascii=False), encoding="utf-8")
+    n_resumed = 0
 
     rows: list[dict] = []
     curves: list[pd.DataFrame] = []
@@ -303,6 +445,30 @@ def run_grid(
             for cfg in configs:
                 done += 1
                 tag = f"[{done}/{total}] {ds_name} seed={seed} {cfg.name}"
+                if resume:
+                    got = None
+                    try:
+                        got = resume_cell(
+                            cfg, data, seed=seed, dataset_name=ds_name, out_dir=out_dir,
+                            train_cfg=train_cfg, param_budget=param_budget,
+                            alarm_budget_per_hour=alarm_budget_per_hour,
+                            half_life_min=half_life_min, persistence=persistence,
+                            node_reduce=node_reduce,
+                        )
+                    except Exception as exc:       # битый файл — просто обучить заново
+                        if verbose:
+                            print(f"{tag}  восстановить не удалось ({type(exc).__name__}: {exc})",
+                                  flush=True)
+                    if got is not None:
+                        row, curve, _, budget, _ = got
+                        rows.append(row)
+                        curves.append(curve)
+                        budgets.append(budget)
+                        n_resumed += 1
+                        if verbose:
+                            print(f"{tag}  восстановлено: recall={row['event_recall']:.3f} "
+                                  f"padf={row['padf']:.3f}", flush=True)
+                        continue
                 if verbose and cfg.is_trainable:
                     print(f"{tag}  обучение…", flush=True)
                 t_cell = time.perf_counter()
@@ -368,6 +534,7 @@ def run_grid(
         "prevalence": {k: v.prevalence for k, v in datasets.items()},
         "n_configs": len(configs),
         "n_failures": len(failures),
+        "n_resumed_cells": n_resumed,
         "reporting_rule": (
             "Агрегация по сидам — среднее. Выбор лучшего сида (best-of-N) запрещён: "
             "при best-of-N часть метрик становится обманываемой (Lyu, 2026). "

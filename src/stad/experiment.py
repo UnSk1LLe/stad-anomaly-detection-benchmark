@@ -284,7 +284,7 @@ def make_figures(
 
 
 # ------------------------------------------------------------------- сквозной
-def run_experiment(cfg: ExperimentConfig, *, verbose: bool = True) -> dict:
+def run_experiment(cfg: ExperimentConfig, *, verbose: bool = True, resume: bool = False) -> dict:
     """Полный цикл: данные, сетка, фигуры, отчёт."""
     out = Path(cfg.out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -317,7 +317,7 @@ def run_experiment(cfg: ExperimentConfig, *, verbose: bool = True) -> dict:
         out_dir=out, alarm_budget_per_hour=cfg.alarm_budget_per_hour,
         half_life_min=cfg.half_life_min,
         persistence=cfg.persistence, node_reduce=cfg.node_reduce,
-        save_checkpoints=cfg.save_checkpoints, verbose=verbose,
+        save_checkpoints=cfg.save_checkpoints, verbose=verbose, resume=resume,
     )
     runs, curves = artifacts["runs"], artifacts["curves"]
     if runs.empty:

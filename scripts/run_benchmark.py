@@ -42,6 +42,8 @@ def main() -> int:
     p.add_argument("--epochs", type=int, help="переопределить число эпох")
     p.add_argument("--device", help="cpu | cuda | mps | auto")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--resume", action="store_true",
+                   help="восстановить готовые клетки из out-dir (score + чекпойнт) без переобучения")
     args = p.parse_args()
 
     if not args.config.exists():
@@ -63,7 +65,7 @@ def main() -> int:
         cfg.train["device"] = args.device
 
     try:
-        run_experiment(cfg, verbose=not args.quiet)
+        run_experiment(cfg, verbose=not args.quiet, resume=args.resume)
     except Exception as exc:
         print(f"\nПрогон прерван: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
