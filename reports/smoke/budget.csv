@@ -1,7 +1,0 @@
-config,dataset,hidden,n_params,target,within_tolerance,deviation
-ctrl_untrained,synthetic,88,55234,60000,True,0.07943333333333333
-cand_gcngru_recon,synthetic,88,55234,60000,True,0.07943333333333333
-cand_hypergraph_flow,synthetic,64,59200,60000,True,0.013333333333333334
-ctrl_untrained,synthetic,88,55234,60000,True,0.07943333333333333
-cand_gcngru_recon,synthetic,88,55234,60000,True,0.07943333333333333
-cand_hypergraph_flow,synthetic,64,59200,60000,True,0.013333333333333334
