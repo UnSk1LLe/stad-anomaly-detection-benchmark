@@ -339,6 +339,18 @@ python scripts/make_figures.py --config configs/ft_aed_core.yaml
 python scripts/rebuild_report.py --run-dir reports/ft_aed_cv --out reports/ft_aed_cv_v1_rebuilt
 ```
 
+Диагностика протокола готового прогона — единицы бюджета тревог (окна и
+эпизоды), полоса случайного контроля, безмодельные score, псевдорепликация
+сидов, сравнение с референсом по событиям — считается по сохранённым score
+без обучения и пишет `DIAGNOSTICS.md` с CSV. Если `scores/` нет, флаг
+`--recompute-nontrainable` пересчитывает небучаемые клетки, а клетки
+обучаемых моделей перечисляются в отчёте как недостающие:
+
+```bash
+python scripts/diagnose_run.py --config configs/ft_aed_cv.yaml \
+       --run-dir reports/ft_aed_cv --out reports/ft_aed_cv_v1_rebuilt --tz-reference
+```
+
 ### Кросс-валидация по дням
 
 При одиночном holdout в тесте остаётся 18 событий из 63, и event-recall
@@ -432,6 +444,7 @@ scripts/
   run_benchmark.py       запуск прогона
   make_figures.py        пересборка фигур без обучения
   rebuild_report.py      пересборка RESULTS.md из таблиц готового прогона (без score)
+  diagnose_run.py        диагностика протокола готового прогона (DIAGNOSTICS.md, без обучения)
   download_data.py       получение FT-AED и проверка схемы
 
 tests/                   метрики, модели, данные
