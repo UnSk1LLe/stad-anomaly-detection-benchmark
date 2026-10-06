@@ -374,7 +374,8 @@ def test_tz_reconciliation_precision_and_status():
     assert row("random_expected_padf")["статус"] == "совпадает до 3-го знака"
     assert row("padf_mean.base_iforest")["статус"] == "нет score"
     band = t.loc["полоса случайного контроля, нижняя граница"]
-    assert band["ТЗ"] == "0.040" and band["статус"].startswith("между вариантами")
+    assert band["ТЗ"] == "0.040" and band["статус"].startswith("расходится")
+    assert "между вариантами" in band["статус"]
     assert t.loc["нулевой разброс по сидам внутри фолда", "статус"].startswith("не определено")
 
 
