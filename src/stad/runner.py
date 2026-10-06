@@ -60,7 +60,13 @@ def _git_sha() -> str:
 
 
 def environment_stamp() -> dict[str, str]:
-    """Штамп окружения — обязательная часть воспроизводимости."""
+    """Штамп окружения — обязательная часть воспроизводимости.
+
+    scikit-learn и scipy — тоже: Isolation Forest и PCA бейзлайнов от их версии
+    зависят, и без версии расхождение пересчёта нельзя отнести к окружению.
+    """
+    import scipy
+    import sklearn
     import torch
 
     return {
@@ -70,6 +76,8 @@ def environment_stamp() -> dict[str, str]:
         "torch": torch.__version__,
         "numpy": np.__version__,
         "pandas": pd.__version__,
+        "scikit_learn": sklearn.__version__,
+        "scipy": scipy.__version__,
         "cuda": torch.version.cuda or "cpu",
         "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
