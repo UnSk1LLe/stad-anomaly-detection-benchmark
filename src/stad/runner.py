@@ -47,7 +47,7 @@ from .metrics import (
 )
 from .model import build_detector
 from .registry import Config, GROUP_LABELS
-from .train import TrainConfig, format_duration, train_detector
+from .train import TrainConfig, format_duration, set_seed, train_detector
 
 
 def _git_sha() -> str:
@@ -291,6 +291,11 @@ def run_config(
         enc_kwargs, head_kwargs, br = _build_recipe(cfg, data, param_budget)
         budget_row = _budget_row(cfg, dataset_name, br)
 
+        # начальные веса задаются сидом клетки, а не состоянием глобального ГСЧ после
+        # предыдущих клеток (подбор бюджета тоже строит модели): иначе клетку нельзя
+        # воспроизвести отдельно, у --resume другие веса, а у ctrl_untrained сид
+        # не определяет, какая именно случайная сеть оценивается
+        set_seed(seed)
         detector = build_detector(
             cfg.encoder, cfg.head, hidden=br.hidden,
             n_features=data.n_features, n_nodes=data.n_nodes, window=data.window,

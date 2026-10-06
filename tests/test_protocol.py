@@ -145,3 +145,26 @@ def test_random_control_check_is_not_weakened():
     runs.loc[runs["config"] == "ctrl_random", "padf"] = 0.9
     checks = {c.name: c for c in validate_protocol(runs, prevalence=0.25)}
     assert not checks["Случайный контроль не обходит обученные модели"].passed
+
+
+def test_untrained_weights_follow_cell_seed(data):
+    """Случайная сеть ctrl_untrained задаётся сидом клетки, а не историей глобального ГСЧ.
+
+    Иначе клетку нельзя воспроизвести отдельно, а при --resume у последующих клеток
+    другие начальные веса, чем в непрерывном прогоне.
+    """
+    import torch
+
+    cfg = Config(name="u", group="control", encoder="gcn_gru", head="recon",
+                 randomize_only=True, rationale="тест")
+    kw = dict(dataset_name="d", train_cfg=TrainConfig(device="cpu"), param_budget=20_000,
+              alarm_budget_per_hour=1.0)
+    torch.manual_seed(123)
+    torch.rand(1000)
+    _, _, s0a, _, _ = run_config(cfg, data, seed=0, **kw)
+    torch.manual_seed(999)
+    torch.rand(7)
+    _, _, s0b, _, _ = run_config(cfg, data, seed=0, **kw)
+    _, _, s1, _, _ = run_config(cfg, data, seed=1, **kw)
+    np.testing.assert_array_equal(s0a, s0b)
+    assert not np.allclose(s0a, s1)
