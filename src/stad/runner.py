@@ -8,7 +8,11 @@
   фигуры и статистику можно было пересчитать без повторного обучения;
 * score калибровочной выборки там же, с суффиксом ``__calib.npy``: порог калибруется по
   ним, а не по тесту, и без них порог не пересчитать;
-* таблица подбора бюджета в ``budget.csv``.
+* таблица подбора бюджета в ``budget.csv``;
+* пособытийная таблица в ``events.csv``: строка на событие теста каждой клетки
+  (найдено ли, задержка, кредит ``padf``). Среднее кредита по событиям клетки
+  равно её ``padf``; таблица нужна статистике, где единица — событие (ТЗ v2,
+  задачи 1.2 и 2.4).
 
 Блок (``block``) — это «датасет × сид»: единица, внутри которой методы
 сравниваются напрямую в тесте Фридмана. Он же обеспечивает, что
@@ -32,6 +36,7 @@ from .budget import match_budget
 from .checkpoints import checkpoint_path, describe, load_detector, save_detector
 from .data.types import SplitData
 from .encoders import ENCODER_LABELS
+from .eventlog import EVENT_COLUMNS, event_table
 from .heads import HEAD_LABELS, HEAD_MECHANISM
 from .metrics import (
     eval_segments,
@@ -363,6 +368,31 @@ def run_config(
     return row, curve, scores, budget_row, calib_scores
 
 
+#: Колонки ``events.csv``: идентификатор клетки и пособытийная таблица.
+EVENTS_CSV_COLUMNS: tuple[str, ...] = ("config", "dataset", "seed", *EVENT_COLUMNS)
+
+
+def _cell_events(
+    row: dict, scores: np.ndarray, data: SplitData, *, half_life_min: float, persistence: int,
+    node_reduce: str,
+) -> pd.DataFrame:
+    """Строки ``events.csv`` одной клетки.
+
+    Порог — откалиброванный на валидации и уже записанный в строку ``runs.csv``;
+    здесь он не пересчитывается, тестовые метки на него не влияют. Порог другого
+    происхождения (oracle по тесту) — ошибка: в ``events.csv`` его не было бы видно.
+    """
+    if row.get("threshold_source") != "validation":
+        raise ValueError(f"events.csv строится только по порогу валидации, "
+                         f"а в строке threshold_source={row.get('threshold_source')!r}")
+    ev = event_table(scores, data, float(row["threshold"]), half_life_min=half_life_min,
+                     persistence=persistence, node_reduce=node_reduce)
+    ev.insert(0, "seed", row["seed"])
+    ev.insert(0, "dataset", row["dataset"])
+    ev.insert(0, "config", row["config"])
+    return ev
+
+
 def _eta_text(t_grid: float, remaining: list[Config], cells: list[tuple[str, float]],
               trainable: dict[str, bool]) -> str:
     elapsed = time.perf_counter() - t_grid
@@ -432,6 +462,7 @@ def run_grid(
     rows: list[dict] = []
     curves: list[pd.DataFrame] = []
     budgets: list[dict] = []
+    events: list[pd.DataFrame] = []
     failures: list[dict] = []
 
     total = len(datasets) * len(seeds) * len(configs)
@@ -455,13 +486,19 @@ def run_grid(
                             half_life_min=half_life_min, persistence=persistence,
                             node_reduce=node_reduce,
                         )
+                        if got is not None:
+                            # внутри try: сбой таблицы — та же клетка заново, а не падение сетки
+                            cell_events = _cell_events(got[0], got[2], data, half_life_min=half_life_min,
+                                                       persistence=persistence, node_reduce=node_reduce)
                     except Exception as exc:       # битый файл — просто обучить заново
+                        got = None
                         if verbose:
                             print(f"{tag}  восстановить не удалось ({type(exc).__name__}: {exc})",
                                   flush=True)
                     if got is not None:
                         row, curve, _, budget, _ = got
                         rows.append(row)
+                        events.append(cell_events)
                         curves.append(curve)
                         budgets.append(budget)
                         n_resumed += 1
@@ -481,7 +518,11 @@ def run_grid(
                         node_reduce=node_reduce,
                         checkpoint_dir=out_dir if save_checkpoints else None,
                     )
+                    # до добавления строки: клетка с ошибкой не оставляет ни строки, ни событий
+                    cell_events = _cell_events(row, scores, data, half_life_min=half_life_min,
+                                               persistence=persistence, node_reduce=node_reduce)
                     rows.append(row)
+                    events.append(cell_events)
                     curves.append(curve)
                     if budget:
                         budgets.append(budget)
@@ -509,8 +550,11 @@ def run_grid(
     curves_df = pd.concat(curves, ignore_index=True) if curves else pd.DataFrame()
     budget_df = pd.DataFrame(budgets)
     fail_df = pd.DataFrame(failures)
+    events_df = (pd.concat(events, ignore_index=True) if events
+                 else pd.DataFrame(columns=list(EVENTS_CSV_COLUMNS)))
 
     runs.to_csv(out_dir / "runs.csv", index=False, encoding="utf-8")
+    events_df.to_csv(out_dir / "events.csv", index=False, encoding="utf-8")
     if not curves_df.empty:
         curves_df.to_csv(out_dir / "curves.csv", index=False, encoding="utf-8")
     if not budget_df.empty:
@@ -544,4 +588,5 @@ def run_grid(
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
-    return {"runs": runs, "curves": curves_df, "budget": budget_df, "failures": fail_df}
+    return {"runs": runs, "curves": curves_df, "budget": budget_df, "failures": fail_df,
+            "events": events_df}
