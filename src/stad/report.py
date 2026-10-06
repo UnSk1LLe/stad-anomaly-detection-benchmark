@@ -30,7 +30,7 @@ from .metrics.stats import (
     paired_bootstrap_test,
     variance_decomposition,
 )
-from .registry import PRIMARY_COMPARISON, REFERENCE
+from .registry import EXTENDED, PRIMARY_COMPARISON, REFERENCE
 
 
 @dataclass
@@ -71,7 +71,20 @@ def _block_pivot(runs: pd.DataFrame, metric: str, *, by: str = "block") -> pd.Da
     return pivot.dropna(axis=1, how="any").dropna(axis=0, how="any")
 
 
-def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
+def _budget_text(runs: pd.DataFrame, alarm_budget_per_hour: float | None) -> str:
+    """Бюджет тревог прогона для текста проверок: явный аргумент, иначе из ``runs``."""
+    if alarm_budget_per_hour is not None:
+        return f"{alarm_budget_per_hour:g}"
+    if "alarm_budget_per_hour" in runs.columns:
+        vals = sorted(runs["alarm_budget_per_hour"].dropna().unique())
+        if vals:
+            return ", ".join(f"{v:g}" for v in vals)
+    return "?"
+
+
+def validate_protocol(
+    runs: pd.DataFrame, prevalence: float, *, alarm_budget_per_hour: float | None = None
+) -> list[Check]:
     """Проверить, что метрики не сломаны, **до** интерпретации результатов.
 
     Пункты воспроизводят предсказания литературы на наших данных:
@@ -84,6 +97,9 @@ def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
     * обученная референсная модель должна превосходить свою же
       необученную версию — иначе архитектурные различия обсуждать
       бессмысленно (Kim et al., 2021).
+
+    ``alarm_budget_per_hour`` нужен только для текста деталей; по умолчанию
+    бюджет берётся из колонки ``runs`` (значение, при котором прогон шёл).
     """
     checks: list[Check] = []
     agg = runs.groupby("config").agg(
@@ -108,7 +124,8 @@ def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
             Check(
                 "Случайный score: padf у пола",
                 bool(r["padf"] < 0.25),
-                f"padf={r['padf']:.4f} (ожидается < 0.25 при бюджете 1 тревога/ч)",
+                f"padf={r['padf']:.4f} (ожидается < 0.25 при бюджете "
+                f"{_budget_text(runs, alarm_budget_per_hour)} тревог/ч)",
             )
         )
         checks.append(
@@ -221,7 +238,12 @@ def validate_protocol(runs: pd.DataFrame, prevalence: float) -> list[Check]:
 
 
 def rank_table(runs: pd.DataFrame, *, metric: str = "padf", higher_is_better: bool = True) -> pd.DataFrame:
-    """Сводная таблица: среднее ± стд, ранг, и всё операционно важное."""
+    """Сводная таблица: среднее ± стд, ранг, и всё операционно важное.
+
+    ``n_timed`` — число клеток с замеренным временем вывода: у клеток,
+    возобновлённых из старых чекпойнтов, его нет, и среднее ``inference_ms``
+    считается по меньшему числу клеток, чем остальные колонки.
+    """
     agg = runs.groupby(["config", "label", "group_label"], as_index=False).agg(
         padf=("padf", "mean"),
         padf_std=("padf", "std"),
@@ -236,6 +258,7 @@ def rank_table(runs: pd.DataFrame, *, metric: str = "padf", higher_is_better: bo
         pa_inflation=("pa_inflation_ratio", "mean"),
         n_params=("n_params", "mean"),
         inference_ms=("inference_ms_per_window", "mean"),
+        n_timed=("inference_ms_per_window", "count"),
         n_runs=("padf", "size"),
     )
     # ранги — только внутри предзарегистрированного подмножества; остальные
@@ -290,18 +313,134 @@ def axis_importance(runs: pd.DataFrame, *, metric: str = "padf") -> pd.DataFrame
     return variance_decomposition(sub, value=metric)
 
 
+def _cross_cover(sub: pd.DataFrame) -> tuple[int, int, int]:
+    """``(уровней энкодера, уровней головы, присутствующих пар)`` в подмножестве."""
+    if sub.empty:
+        return 0, 0, 0
+    pairs = sub[["encoder", "head"]].drop_duplicates()
+    return int(sub["encoder"].nunique()), int(sub["head"].nunique()), len(pairs)
+
+
+def _deep_runs(runs: pd.DataFrame) -> pd.DataFrame:
+    """Прогоны с энкодером и головой, без протокольных контролей (``ctrl_untrained``)."""
+    if "encoder" not in runs.columns or "head" not in runs.columns:
+        return runs.iloc[0:0]
+    mask = runs["encoder"].notna() & runs["head"].notna()
+    if "group" in runs.columns:
+        mask &= runs["group"] != "control"
+    return runs[mask]
+
+
+def _complete_blocks(sub: pd.DataFrame, n_cells: int) -> pd.DataFrame:
+    """Только блоки, в которых есть все ``n_cells`` пар энкодер × голова.
+
+    Пара, упавшая в части блоков (``failures.csv``), делает дизайн
+    несбалансированным, и eta² снова смешивает оси с составом блоков.
+    """
+    if "block" not in sub.columns:
+        return sub
+    per_block = sub[["block", "encoder", "head"]].drop_duplicates().groupby("block").size()
+    return sub[sub["block"].isin(per_block[per_block == n_cells].index)]
+
+
+def _cross_candidates(runs: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    """Подмножества, проверяемые на полный крест: все обучаемые, затем клетки ``extended``."""
+    deep = _deep_runs(runs)
+    ext = deep[deep["config"].isin({c.name for c in EXTENDED})]
+    return [("обучаемых конфигураций", deep)] + ([("сетки extended", ext)] if not ext.empty else [])
+
+
+def full_cross(runs: pd.DataFrame) -> pd.DataFrame:
+    """Подмножество прогонов, образующее полный крест энкодер × голова, или пустая таблица.
+
+    R3 сравнивает eta² двух осей, и это сравнение осмысленно только если
+    каждая пара уровней присутствует: на нескрещённой сетке (``core``: 4
+    энкодера × 5 голов на 6 клетках) оси смешаны, и eta² одной оси
+    наполовину объясняется другой. Сначала проверяются все обучаемые
+    конфигурации без контролей, затем — только клетки сетки ``extended``.
+    Нужно не меньше двух уровней на каждой оси; берутся только блоки, где
+    присутствуют все пары (:func:`_complete_blocks`).
+    """
+    for _, sub in _cross_candidates(runs):
+        n_enc, n_head, n_pairs = _cross_cover(sub)
+        if n_enc >= 2 and n_head >= 2 and n_pairs == n_enc * n_head:
+            sub = _complete_blocks(sub, n_pairs)
+            if not sub.empty:
+                return sub
+    return runs.iloc[0:0]
+
+
+def _cross_gap(runs: pd.DataFrame) -> str | None:
+    """Почему полного креста нет — текст для R3 и раздела 4.
+
+    ``None``, если крест есть или пар энкодер × голова меньше двух
+    (сравнивать оси не на чем).
+    """
+    if not full_cross(runs).empty:
+        return None
+    cands = _cross_candidates(runs)
+    if _cross_cover(cands[0][1])[2] < 2:
+        return None
+    # знаменатель — у подмножества, ближайшего к кресту: при наличии клеток
+    # extended это они, а не весь грид с нескрещёнными головами ядра
+    where, sub = cands[-1]
+    n_enc, n_head, n_pairs = _cross_cover(sub)
+    if n_enc < 2 or n_head < 2:
+        axis = "энкодера" if n_enc < 2 else "головы"
+        return (f"у оси {axis} среди {where} один уровень ({n_enc}×{n_head}) — "
+                f"разложение дисперсии по осям не определено")
+    if n_pairs == n_enc * n_head:
+        return (f"все {n_pairs} пар {n_enc}×{n_head} {where} присутствуют, но ни в одном блоке "
+                f"нет их всех сразу (часть клеток упала) — дизайн несбалансирован")
+    return (f"сетка не является полным крестом: присутствует {n_pairs} из {n_enc}×{n_head} = "
+            f"{n_enc * n_head} пар энкодер × голова {where}, оси смешаны")
+
+
 # --------------------------------------------------------------------- правила
+#: Действие правила, когда R0 провален: числа остаются, вывода нет.
+BLOCKED_R0 = "не оценивается: R0 провален"
+#: Действие R3 без полного креста энкодер × голова.
+NEEDS_EXTENDED = "не оценивается: требует сетки extended"
+#: Префикс действия R2–R7, заблокированных исходом R1 (DECISION_RULES, приоритет 2).
+BLOCKED_R1 = "заблокировано R1"
+_R1_BLOCKED_RULES = ("R2", "R3", "R4", "R5", "R6", "R7")
+
+
+def _rule_id(entry: dict[str, str]) -> str:
+    return entry["rule"].split(" ", 1)[0]
+
+
 def decide(
     runs: pd.DataFrame,
     *,
     metric: str = "padf",
     reference: str = REFERENCE,
+    checks: list[Check] | None = None,
 ) -> list[dict[str, str]]:
     """Применить решающие правила из docs/DECISION_RULES.md.
 
     Каждое правило: условие на числах → однозначная рекомендация для
     конкретной главы диссертации. Правила зафиксированы заранее.
+
+    Блокировки из раздела «Приоритет при конфликте правил» применяются
+    здесь же, а не оставляются читателю отчёта:
+
+    * провал любой критической проверки ``validate_protocol`` (R0) — у всех
+      правил остаётся наблюдение, действие заменяется на «не оценивается»;
+    * R1 «отрыв НЕ значим» или R1 не оценён — R2–R7 заблокированы;
+    * R3 считается только на полном кресте энкодер × голова (:func:`full_cross`).
+
+    ``checks`` — результат ``validate_protocol``; если не передан, считается
+    здесь, чтобы гейт R0 нельзя было забыть. У каждой записи есть ``status``:
+    ``ok``, ``blocked_r0``, ``blocked_r1``, ``needs_extended`` или ``failed`` (сам R0).
     """
+    if checks is None:
+        # та же величина, что в manifest: доля аномалий на датасет, а не на клетку
+        prevalence = (float(runs.groupby("dataset")["prevalence"].first().mean())
+                      if "prevalence" in runs.columns else float("nan"))
+        checks = validate_protocol(runs, prevalence)
+    failed = [c for c in checks if c.critical and not c.passed]
+
     out: list[dict[str, str]] = []
     agg = runs.groupby("config")[metric].mean()
     cmp = compare_to_reference(runs, metric=metric, reference=reference)
@@ -330,9 +469,14 @@ def decide(
         })
 
     # ---- R1: превосходит ли глубина линейную границу
+    r1_block: str | None = "R1 в этом прогоне не оценён (нет base_pca или референса)"
     if "base_pca" in agg.index and reference in agg.index:
         pca_cmp = cmp[cmp["config"] == "base_pca"] if not cmp.empty else pd.DataFrame()
         beats_pca = (not pca_cmp.empty) and pca_cmp.iloc[0]["verdict"] == "хуже значимо"
+        r1_block = None if beats_pca else (
+            "отрыв референса от PCA не значим, глубина не окупается — выбор между глубокими "
+            "архитектурами не является предметом работы (DECISION_RULES, приоритет 2)"
+        )
         out.append({
             "rule": "R1 — оправдана ли глубокая модель",
             "finding": (
@@ -368,15 +512,29 @@ def decide(
             ),
         })
 
-    # ---- R3: какая ось важнее
-    eta = axis_importance(runs, metric=metric)
+    # ---- R3: какая ось важнее — только на полном кресте энкодер × голова
+    cross = full_cross(runs)
+    eta = variance_decomposition(cross, value=metric) if not cross.empty else pd.DataFrame()
+    gap = _cross_gap(runs)
+    if gap is not None:
+        out.append({
+            "rule": "R3 — энкодер или механизм score",
+            "finding": gap[0].upper() + gap[1:] + ".",
+            # одна extended не содержит base_pca и референса: R1 там не оценим, и R3
+            # всё равно заблокирован — оценить его может только сетка all
+            "action": f"{NEEDS_EXTENDED} (в составе `all` = core + extended)",
+            "status": "needs_extended",
+        })
     if not eta.empty and len(eta) == 2:
         e = dict(zip(eta["axis"], eta["eta2"]))
         enc, head = e.get("encoder", np.nan), e.get("head", np.nan)
         if np.isfinite(enc) and np.isfinite(head):
             out.append({
                 "rule": "R3 — энкодер или механизм score",
-                "finding": f"eta² энкодера = {enc:.3f}, eta² головы = {head:.3f}.",
+                "finding": (
+                    f"eta² энкодера = {enc:.3f}, eta² головы = {head:.3f} "
+                    f"(полный крест: {cross['config'].nunique()} конфигураций)."
+                ),
                 "action": (
                     "Механизм score объясняет больше разброса — ГЛАВНЫЙ АРГУМЕНТ диссертации: "
                     "вклад следует делать в механизм (критик / плотность / физика), "
@@ -461,7 +619,46 @@ def decide(
                 ),
             })
             break
+
+    for r in out:
+        r.setdefault("status", "ok")
+
+    # ---- блокировки (DECISION_RULES, «Приоритет при конфликте правил»)
+    if failed:
+        # словесный вердикт в наблюдении («отрыв НЕ значим», «хуже значимо») —
+        # тоже вывод; при R0 он остаётся только справочно
+        for r in out:
+            r["action"], r["status"] = BLOCKED_R0, "blocked_r0"
+            r["finding"] = "Справочно, без вывода: " + r["finding"]
+        out.insert(0, {
+            "rule": "R0 — валидация протокола",
+            "finding": "Критические проверки провалены: " + "; ".join(c.name for c in failed) + ".",
+            "action": (
+                "СТОП. Выводы по правилам не делаются, пока протокол не исправлен; "
+                "числа в наблюдениях ниже приведены справочно."
+            ),
+            "status": "failed",
+        })
+    elif r1_block is not None:
+        for r in out:
+            if _rule_id(r) in _R1_BLOCKED_RULES:
+                r["action"], r["status"] = f"{BLOCKED_R1}: {r1_block}.", "blocked_r1"
     return out
+
+
+RULE_STATUS: dict[str, str] = {
+    "failed": "протокол не прошёл валидацию",
+    "blocked_r0": "заблокировано: R0 провален",
+    "blocked_r1": "заблокировано исходом R1",
+    "needs_extended": "вне области определения правила: нужен полный крест",
+}
+
+
+def _ms_cell(r: pd.Series) -> str:
+    """Ячейка «мс/окно»: «*» — среднее не по всем клеткам, «—» — замеров нет."""
+    if r["n_timed"] == 0 or not np.isfinite(r["inference_ms"]):
+        return "—"
+    return f"{r['inference_ms']:.2f}" + ("*" if r["n_timed"] < r["n_runs"] else "")
 
 
 def write_results_md(
@@ -472,15 +669,20 @@ def write_results_md(
     manifest: dict,
     figures: list[str],
     metric: str = "padf",
+    source_note: str | None = None,
 ) -> Path:
-    """Собрать ``reports/RESULTS.md`` — итоговый документ эксперимента."""
+    """Собрать ``reports/RESULTS.md`` — итоговый документ эксперимента.
+
+    ``source_note`` заменяет первую фразу «Сгенерировано автоматически…» —
+    для отчётов, пересобранных из сохранённых таблиц другим коммитом кода.
+    """
     out_path = Path(out_path)
     prevalence = float(np.mean(list(manifest.get("prevalence", {1: 0.01}).values())))
     checks = validate_protocol(runs, prevalence)
     table = rank_table(runs, metric=metric)
     cmp = compare_to_reference(runs, metric=metric)
     eta = axis_importance(runs, metric=metric)
-    rules = decide(runs, metric=metric)
+    rules = decide(runs, metric=metric, checks=checks)
 
     sub, sub_note = primary_runs(runs)
     pivot = _block_pivot(sub, metric)
@@ -491,8 +693,9 @@ def write_results_md(
     L.append("# Результаты: сравнение архитектур детекции аномалий трафика\n")
     env = manifest.get("environment", {})
     L.append(
-        f"Сгенерировано автоматически из `reports/runs.csv`. "
-        f"Коммит `{env.get('git_sha', '?')}`, torch {env.get('torch', '?')}, "
+        (source_note.rstrip(".") + ". " if source_note else
+         "Сгенерировано автоматически из `reports/runs.csv`. ")
+        + f"Коммит `{env.get('git_sha', '?')}`, torch {env.get('torch', '?')}, "
         f"устройство {env.get('device_name', '?')}. "
         f"Сидов на конфигурацию: **{manifest.get('n_seeds', '?')}** "
         f"(агрегация — среднее, best-of-N запрещён).\n"
@@ -550,7 +753,24 @@ def write_results_md(
             f"{f(r['ap_lift'], '.1f')}× | {f(r['alarms_per_hour'], '.2f')} | "
             f"{f(r['fpr_observed'], '.4f')} | "
             f"{int(r['n_params']) if np.isfinite(r['n_params']) else '—'} | "
-            f"{f(r['inference_ms'], '.2f')} |"
+            f"{_ms_cell(r)} |"
+        )
+    # у клеток, возобновлённых без замера времени (старые чекпойнты), времени нет:
+    # среднее мс/окно по остальным клеткам помечается, а не выдаётся за полное
+    partial = table[(table["n_timed"] > 0) & (table["n_timed"] < table["n_runs"])]
+    untimed = table[table["n_timed"] == 0]
+    if not partial.empty:
+        L.append(
+            "\n\\* — среднее по k из n клеток: у остальных замера времени нет (как правило, "
+            "возобновлены через --resume из чекпойнта без замера): " + "; ".join(
+                f"{r['label']} — {int(r['n_timed'])} из {int(r['n_runs'])}"
+                for _, r in partial.iterrows()
+            ) + ".\n"
+        )
+    if not untimed.empty:
+        L.append(
+            "\n«—» в колонке «мс/окно» — замеров времени нет ни в одной клетке: "
+            + ", ".join(str(r["label"]) for _, r in untimed.iterrows()) + ".\n"
         )
     L.append(
         f"\n**Реальная частота ложных тревог.** Порог калибруется по окнам дней валидации на "
@@ -564,7 +784,7 @@ def write_results_md(
     L.append(
         "\n`PA-F1` сознательно **не** включён в таблицу ранжирования: он непригоден для "
         "сравнения моделей. Его значения и коэффициент инфляции — на фигуре 05 "
-        "и в `reports/tables/fig05_metric_inflation.csv`.\n"
+        "и в `tables/fig05_metric_inflation.csv`.\n"
     )
 
     # ---------------------------------------------------------- 3. против референса
@@ -574,12 +794,17 @@ def write_results_md(
             "Парный bootstrap на одних и тех же блоках. Референс — графовый автоэнкодер, "
             "то есть семейство, названное лучшим в бенчмарке FT-AED.\n"
         )
+        if critical_failed:
+            L.append(
+                "Числа приведены справочно: R0 провален, поэтому вердикты не оцениваются.\n"
+            )
         L.append("| Конфигурация | Δ padf | 95% ДИ | p | Вердикт |")
         L.append("|---|---|---|---|---|")
         for _, r in cmp.iterrows():
+            v = "не оценивается (R0)" if critical_failed else r["verdict"]
             L.append(
                 f"| {r['label']} | {r['mean_diff']:+.4f} | "
-                f"[{r['ci_lo']:+.4f}, {r['ci_hi']:+.4f}] | {r['p_value']:.3f} | {r['verdict']} |"
+                f"[{r['ci_lo']:+.4f}, {r['ci_hi']:+.4f}] | {r['p_value']:.3f} | {v} |"
             )
         L.append("")
 
@@ -592,6 +817,28 @@ def write_results_md(
             name = "энкодер" if r["axis"] == "encoder" else "механизм score (голова)"
             L.append(f"| {name} | {int(r['n_levels'])} | {r['eta2']:.3f} |")
         L.append("")
+        gap = _cross_gap(runs)
+        cross = full_cross(runs)
+        if gap is not None:
+            L.append(
+                f"> Полного креста энкодер × голова нет: {gap}. Таблица выше описательная, "
+                f"правило R3 по ней не оценивается (требует сетки `extended` в составе `all` = "
+                f"core + extended).\n"
+            )
+        elif not cross.empty and len(cross) != int((runs["encoder"].notna() & runs["head"].notna()).sum()):
+            # таблица выше — по всем конфигурациям с энкодером и головой (вместе с
+            # нескрещёнными и ctrl_untrained); R3 считается только на кресте
+            L.append(
+                f"Таблица выше описательная: все конфигурации с энкодером и головой, включая "
+                f"нескрещённые и `ctrl_untrained`. Правило R3 (раздел 5) оценивается только на "
+                f"полном кресте из {cross['config'].nunique()} конфигураций:\n"
+            )
+            L.append("| Ось (полный крест, R3) | Уровней | eta² |")
+            L.append("|---|---|---|")
+            for _, r in variance_decomposition(cross, value=metric).iterrows():
+                name = "энкодер" if r["axis"] == "encoder" else "механизм score (голова)"
+                L.append(f"| {name} | {int(r['n_levels'])} | {r['eta2']:.3f} |")
+            L.append("")
 
     # ---------------------------------------------------------- 5. решения
     L.append("## 5. Вывод для диссертации\n")
@@ -599,8 +846,16 @@ def write_results_md(
         "Решающие правила зафиксированы в `docs/DECISION_RULES.md` **до** прогона — "
         "чтобы вывод нельзя было подогнать под полученные числа.\n"
     )
+    if critical_failed:
+        L.append(
+            "> **СТОП.** R0 провален: ни одно правило ниже не оценивается. Наблюдения "
+            "оставлены справочно: словесные вердикты в них («значим», «неразличимо») "
+            "выводами не являются; действий нет.\n"
+        )
     for r in rules:
         L.append(f"### {r['rule']}\n")
+        if r.get("status", "ok") != "ok":
+            L.append(f"**Статус.** `{r['status']}` — {RULE_STATUS.get(r['status'], r['status'])}\n")
         L.append(f"**Наблюдение.** {r['finding']}\n")
         L.append(f"**Что делать.** {r['action']}\n")
 
@@ -622,7 +877,13 @@ def write_results_md(
         key = stem.split("_")[0]
         L.append(f"**{captions.get(key, stem)}**\n")
         L.append(f"![{stem}](figures/{Path(fname).name})\n")
-        L.append(f"Числа фигуры: `reports/tables/{stem}.csv`\n")
+        L.append(f"Числа фигуры: `tables/{stem}.csv`\n")
+        if key == "fig07" and (table["n_timed"] < table["n_runs"]).any():
+            L.append(
+                "Время вывода у части конфигураций усреднено не по всем клеткам (пометка «*» "
+                "на фигуре, колонки `n_timed` и `n_runs` в CSV); конфигураций без замеров "
+                "на фигуре нет.\n"
+            )
 
     # ---------------------------------------------------------- 7. оговорки
     L.append("## 7. Ограничения этого прогона\n")

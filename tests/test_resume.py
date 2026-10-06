@@ -6,6 +6,7 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from stad import runner
 from stad.checkpoints import checkpoint_path
@@ -61,7 +62,12 @@ def test_resume_reproduces_metrics_without_retraining(data, tmp_path, train_call
     pd.testing.assert_frame_equal(a[METRICS].sort_index(), b[METRICS].sort_index(), check_exact=False,
                                   rtol=1e-6, atol=1e-9)
     assert bool(b.loc["t_gcn", "resumed"]) and not bool(b.loc["b_snd", "resumed"])
-    assert np.isnan(b.loc["t_gcn", "train_seconds"])   # время обучения не восстанавливается
+    # время обучения и вывода восстанавливается из чекпойнта, а не теряется
+    assert b.loc["t_gcn", "train_seconds"] == pytest.approx(a.loc["t_gcn", "train_seconds"])
+    assert b.loc["t_gcn", "inference_ms_per_window"] == pytest.approx(
+        a.loc["t_gcn", "inference_ms_per_window"])
+    assert b.loc["t_gcn", "timing_source"] == "checkpoint"
+    assert (a["timing_source"] == "measured").all() and b.loc["b_snd", "timing_source"] == "measured"
     pd.testing.assert_frame_equal(
         first["curves"].sort_values(["config", "alarm_budget_per_hour"]).reset_index(drop=True),
         again["curves"].sort_values(["config", "alarm_budget_per_hour"]).reset_index(drop=True),
@@ -70,6 +76,22 @@ def test_resume_reproduces_metrics_without_retraining(data, tmp_path, train_call
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["n_resumed_cells"] == 1
     assert len(again["budget"]) == 1
+
+
+def test_resume_from_checkpoint_without_timing_marks_missing(data, tmp_path, train_calls):
+    """Чекпойнт, записанный до сохранения времени: NaN и явная пометка, а не тихий пропуск."""
+    grid(data, tmp_path)
+    ckpt = checkpoint_path(tmp_path, "t_gcn", "d", 0)
+    blob = torch.load(ckpt, map_location="cpu", weights_only=False)
+    for key in ("train_seconds", "inference_ms_per_window"):
+        blob["extra"].pop(key)
+    torch.save(blob, ckpt)
+    train_calls.clear()
+
+    row = grid(data, tmp_path, resume=True)["runs"].set_index("config").loc["t_gcn"]
+    assert train_calls == [] and bool(row["resumed"])
+    assert np.isnan(row["train_seconds"]) and np.isnan(row["inference_ms_per_window"])
+    assert row["timing_source"] == "missing"
 
 
 def test_resume_restores_physics_extras(data, tmp_path, train_calls):

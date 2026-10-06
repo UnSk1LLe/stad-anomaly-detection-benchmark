@@ -330,6 +330,15 @@ python scripts/run_benchmark.py --config configs/smoke.yaml \
 python scripts/make_figures.py --config configs/ft_aed_core.yaml
 ```
 
+Если нужен только отчёт текущим кодом (например, после изменения блокировок
+выводов), а датасетов и score нет, — `scripts/rebuild_report.py` читает
+`runs.csv`, `curves.csv`, `manifest.json` и `experiment_config.json` каталога
+прогона и пишет RESULTS.md с фигурами 01, 02, 04–07, 09 в другой каталог:
+
+```bash
+python scripts/rebuild_report.py --run-dir reports/ft_aed_cv --out reports/ft_aed_cv_v1_rebuilt
+```
+
 ### Кросс-валидация по дням
 
 При одиночном holdout в тесте остаётся 18 событий из 63, и event-recall
@@ -422,6 +431,7 @@ src/stad/
 scripts/
   run_benchmark.py       запуск прогона
   make_figures.py        пересборка фигур без обучения
+  rebuild_report.py      пересборка RESULTS.md из таблиц готового прогона (без score)
   download_data.py       получение FT-AED и проверка схемы
 
 tests/                   метрики, модели, данные

@@ -192,8 +192,10 @@ def resume_cell(
     подобранному под ТЕКУЩИЙ бюджет, совпадают энкодер, голова, датасет и сид.
 
     Метрики пересчитываются по тем же score теми же функциями, что и при
-    обычном прогоне, поэтому совпадают с ними. Не восстанавливаются время
-    обучения и вывода (NaN); в строке ``resumed=True``.
+    обычном прогоне, поэтому совпадают с ними. Время обучения и вывода берётся
+    из чекпойнта (``timing_source="checkpoint"``); в чекпойнтах, записанных до
+    его сохранения, времени нет — тогда NaN и ``timing_source="missing"``, чтобы
+    отчёт пометил неполное среднее. В строке ``resumed=True``.
     """
     if not cfg.is_trainable or cfg.randomize_only:
         return None
@@ -224,13 +226,15 @@ def resume_cell(
             extras["physics_correction_share"] = float(
                 detector.head.correction_share(detector.encoder(x_enc), x_tgt)
             )
+    timed = "train_seconds" in info and "inference_ms_per_window" in info
     runtime = {
         "n_params": detector.n_params,
         "hidden": br.hidden,
         "budget_within_tolerance": br.within_tolerance,
         "epochs_run": info.get("epochs_run", np.nan),
-        "train_seconds": np.nan,
-        "inference_ms_per_window": np.nan,
+        "train_seconds": float(info.get("train_seconds", np.nan)),
+        "inference_ms_per_window": float(info.get("inference_ms_per_window", np.nan)),
+        "timing_source": "checkpoint" if timed else "missing",
         "best_val_loss": info.get("best_val_loss", np.nan),
         "uses_graph": bool(detector.uses_graph),
         "resumed": True,
@@ -313,6 +317,9 @@ def run_config(
                     "config": cfg.name, "dataset": dataset_name, "seed": seed,
                     "epochs_run": outcome.epochs_run,
                     "best_val_loss": outcome.best_val_loss,
+                    # время — чтобы возобновлённая клетка (--resume) не теряла его
+                    "train_seconds": outcome.train_seconds,
+                    "inference_ms_per_window": outcome.inference_ms_per_window,
                     "step_min": data.meta.get("step_min"),
                     "label_source": data.meta.get("label_source"),
                 },
@@ -324,6 +331,7 @@ def run_config(
             "epochs_run": outcome.epochs_run,
             "train_seconds": outcome.train_seconds,
             "inference_ms_per_window": outcome.inference_ms_per_window,
+            "timing_source": "measured",
             "best_val_loss": outcome.best_val_loss,
             "uses_graph": bool(detector.uses_graph),
             "resumed": False,
@@ -355,6 +363,7 @@ def run_config(
             "epochs_run": 0,
             "train_seconds": fit_s,
             "inference_ms_per_window": 1000.0 * inf_s / max(1, len(data.X_test)),
+            "timing_source": "measured",
             "best_val_loss": np.nan,
             "uses_graph": cfg.baseline == "california",
             "resumed": False,
