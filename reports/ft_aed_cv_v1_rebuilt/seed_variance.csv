@@ -1,0 +1,13 @@
+config,n_folds,n_seeds,max_within_fold_sd,min_distinct,max_distinct,independent_values,zero_within_fold_variance
+base_california,4,5,0.0,1,1,4,True
+base_iforest,4,5,0.10582669959656578,3,5,16,False
+base_pca,4,5,0.0,1,1,4,True
+base_snd,4,5,0.0,1,1,4,True
+cand_gatlstm_recon,4,5,0.1323053131870345,1,5,11,False
+cand_gcngru_bigan,4,5,0.26622636251040194,5,5,20,False
+cand_gcngru_physics,4,5,0.05088458784043874,1,5,12,False
+cand_gcngru_recon,4,5,0.03995332940743793,1,5,12,False
+cand_hypergraph_flow,4,5,0.05733486272404551,2,3,10,False
+ctrl_random,4,5,0.11952286093343935,3,4,14,False
+ctrl_untrained,4,5,0.0,1,1,4,True
+deep_transformer_contrastive,4,5,0.17599034153092297,1,4,10,False

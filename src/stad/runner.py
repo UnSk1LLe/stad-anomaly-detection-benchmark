@@ -8,7 +8,11 @@
   фигуры и статистику можно было пересчитать без повторного обучения;
 * score калибровочной выборки там же, с суффиксом ``__calib.npy``: порог калибруется по
   ним, а не по тесту, и без них порог не пересчитать;
-* таблица подбора бюджета в ``budget.csv``.
+* таблица подбора бюджета в ``budget.csv``;
+* пособытийная таблица в ``events.csv``: строка на событие теста каждой клетки
+  (найдено ли, задержка, кредит ``padf``). Среднее кредита по событиям клетки
+  равно её ``padf``; таблица нужна статистике, где единица — событие (ТЗ v2,
+  задачи 1.2 и 2.4).
 
 Блок (``block``) — это «датасет × сид»: единица, внутри которой методы
 сравниваются напрямую в тесте Фридмана. Он же обеспечивает, что
@@ -32,6 +36,7 @@ from .budget import match_budget
 from .checkpoints import checkpoint_path, describe, load_detector, save_detector
 from .data.types import SplitData
 from .encoders import ENCODER_LABELS
+from .eventlog import EVENT_COLUMNS, event_table
 from .heads import HEAD_LABELS, HEAD_MECHANISM
 from .metrics import (
     eval_segments,
@@ -42,7 +47,7 @@ from .metrics import (
 )
 from .model import build_detector
 from .registry import Config, GROUP_LABELS
-from .train import TrainConfig, format_duration, train_detector
+from .train import TrainConfig, format_duration, set_seed, train_detector
 
 
 def _git_sha() -> str:
@@ -55,7 +60,13 @@ def _git_sha() -> str:
 
 
 def environment_stamp() -> dict[str, str]:
-    """Штамп окружения — обязательная часть воспроизводимости."""
+    """Штамп окружения — обязательная часть воспроизводимости.
+
+    scikit-learn и scipy — тоже: Isolation Forest и PCA бейзлайнов от их версии
+    зависят, и без версии расхождение пересчёта нельзя отнести к окружению.
+    """
+    import scipy
+    import sklearn
     import torch
 
     return {
@@ -65,6 +76,8 @@ def environment_stamp() -> dict[str, str]:
         "torch": torch.__version__,
         "numpy": np.__version__,
         "pandas": pd.__version__,
+        "scikit_learn": sklearn.__version__,
+        "scipy": scipy.__version__,
         "cuda": torch.version.cuda or "cpu",
         "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
     }
@@ -187,8 +200,10 @@ def resume_cell(
     подобранному под ТЕКУЩИЙ бюджет, совпадают энкодер, голова, датасет и сид.
 
     Метрики пересчитываются по тем же score теми же функциями, что и при
-    обычном прогоне, поэтому совпадают с ними. Не восстанавливаются время
-    обучения и вывода (NaN); в строке ``resumed=True``.
+    обычном прогоне, поэтому совпадают с ними. Время обучения и вывода берётся
+    из чекпойнта (``timing_source="checkpoint"``); в чекпойнтах, записанных до
+    его сохранения, времени нет — тогда NaN и ``timing_source="missing"``, чтобы
+    отчёт пометил неполное среднее. В строке ``resumed=True``.
     """
     if not cfg.is_trainable or cfg.randomize_only:
         return None
@@ -219,13 +234,15 @@ def resume_cell(
             extras["physics_correction_share"] = float(
                 detector.head.correction_share(detector.encoder(x_enc), x_tgt)
             )
+    timed = "train_seconds" in info and "inference_ms_per_window" in info
     runtime = {
         "n_params": detector.n_params,
         "hidden": br.hidden,
         "budget_within_tolerance": br.within_tolerance,
         "epochs_run": info.get("epochs_run", np.nan),
-        "train_seconds": np.nan,
-        "inference_ms_per_window": np.nan,
+        "train_seconds": float(info.get("train_seconds", np.nan)),
+        "inference_ms_per_window": float(info.get("inference_ms_per_window", np.nan)),
+        "timing_source": "checkpoint" if timed else "missing",
         "best_val_loss": info.get("best_val_loss", np.nan),
         "uses_graph": bool(detector.uses_graph),
         "resumed": True,
@@ -282,6 +299,11 @@ def run_config(
         enc_kwargs, head_kwargs, br = _build_recipe(cfg, data, param_budget)
         budget_row = _budget_row(cfg, dataset_name, br)
 
+        # начальные веса задаются сидом клетки, а не состоянием глобального ГСЧ после
+        # предыдущих клеток (подбор бюджета тоже строит модели): иначе клетку нельзя
+        # воспроизвести отдельно, у --resume другие веса, а у ctrl_untrained сид
+        # не определяет, какая именно случайная сеть оценивается
+        set_seed(seed)
         detector = build_detector(
             cfg.encoder, cfg.head, hidden=br.hidden,
             n_features=data.n_features, n_nodes=data.n_nodes, window=data.window,
@@ -308,6 +330,9 @@ def run_config(
                     "config": cfg.name, "dataset": dataset_name, "seed": seed,
                     "epochs_run": outcome.epochs_run,
                     "best_val_loss": outcome.best_val_loss,
+                    # время — чтобы возобновлённая клетка (--resume) не теряла его
+                    "train_seconds": outcome.train_seconds,
+                    "inference_ms_per_window": outcome.inference_ms_per_window,
                     "step_min": data.meta.get("step_min"),
                     "label_source": data.meta.get("label_source"),
                 },
@@ -319,6 +344,7 @@ def run_config(
             "epochs_run": outcome.epochs_run,
             "train_seconds": outcome.train_seconds,
             "inference_ms_per_window": outcome.inference_ms_per_window,
+            "timing_source": "measured",
             "best_val_loss": outcome.best_val_loss,
             "uses_graph": bool(detector.uses_graph),
             "resumed": False,
@@ -350,6 +376,7 @@ def run_config(
             "epochs_run": 0,
             "train_seconds": fit_s,
             "inference_ms_per_window": 1000.0 * inf_s / max(1, len(data.X_test)),
+            "timing_source": "measured",
             "best_val_loss": np.nan,
             "uses_graph": cfg.baseline == "california",
             "resumed": False,
@@ -361,6 +388,31 @@ def run_config(
         persistence=persistence, node_reduce=node_reduce,
     )
     return row, curve, scores, budget_row, calib_scores
+
+
+#: Колонки ``events.csv``: идентификатор клетки и пособытийная таблица.
+EVENTS_CSV_COLUMNS: tuple[str, ...] = ("config", "dataset", "seed", *EVENT_COLUMNS)
+
+
+def _cell_events(
+    row: dict, scores: np.ndarray, data: SplitData, *, half_life_min: float, persistence: int,
+    node_reduce: str,
+) -> pd.DataFrame:
+    """Строки ``events.csv`` одной клетки.
+
+    Порог — откалиброванный на валидации и уже записанный в строку ``runs.csv``;
+    здесь он не пересчитывается, тестовые метки на него не влияют. Порог другого
+    происхождения (oracle по тесту) — ошибка: в ``events.csv`` его не было бы видно.
+    """
+    if row.get("threshold_source") != "validation":
+        raise ValueError(f"events.csv строится только по порогу валидации, "
+                         f"а в строке threshold_source={row.get('threshold_source')!r}")
+    ev = event_table(scores, data, float(row["threshold"]), half_life_min=half_life_min,
+                     persistence=persistence, node_reduce=node_reduce)
+    ev.insert(0, "seed", row["seed"])
+    ev.insert(0, "dataset", row["dataset"])
+    ev.insert(0, "config", row["config"])
+    return ev
 
 
 def _eta_text(t_grid: float, remaining: list[Config], cells: list[tuple[str, float]],
@@ -432,6 +484,7 @@ def run_grid(
     rows: list[dict] = []
     curves: list[pd.DataFrame] = []
     budgets: list[dict] = []
+    events: list[pd.DataFrame] = []
     failures: list[dict] = []
 
     total = len(datasets) * len(seeds) * len(configs)
@@ -455,13 +508,19 @@ def run_grid(
                             half_life_min=half_life_min, persistence=persistence,
                             node_reduce=node_reduce,
                         )
+                        if got is not None:
+                            # внутри try: сбой таблицы — та же клетка заново, а не падение сетки
+                            cell_events = _cell_events(got[0], got[2], data, half_life_min=half_life_min,
+                                                       persistence=persistence, node_reduce=node_reduce)
                     except Exception as exc:       # битый файл — просто обучить заново
+                        got = None
                         if verbose:
                             print(f"{tag}  восстановить не удалось ({type(exc).__name__}: {exc})",
                                   flush=True)
                     if got is not None:
                         row, curve, _, budget, _ = got
                         rows.append(row)
+                        events.append(cell_events)
                         curves.append(curve)
                         budgets.append(budget)
                         n_resumed += 1
@@ -481,7 +540,11 @@ def run_grid(
                         node_reduce=node_reduce,
                         checkpoint_dir=out_dir if save_checkpoints else None,
                     )
+                    # до добавления строки: клетка с ошибкой не оставляет ни строки, ни событий
+                    cell_events = _cell_events(row, scores, data, half_life_min=half_life_min,
+                                               persistence=persistence, node_reduce=node_reduce)
                     rows.append(row)
+                    events.append(cell_events)
                     curves.append(curve)
                     if budget:
                         budgets.append(budget)
@@ -509,8 +572,11 @@ def run_grid(
     curves_df = pd.concat(curves, ignore_index=True) if curves else pd.DataFrame()
     budget_df = pd.DataFrame(budgets)
     fail_df = pd.DataFrame(failures)
+    events_df = (pd.concat(events, ignore_index=True) if events
+                 else pd.DataFrame(columns=list(EVENTS_CSV_COLUMNS)))
 
     runs.to_csv(out_dir / "runs.csv", index=False, encoding="utf-8")
+    events_df.to_csv(out_dir / "events.csv", index=False, encoding="utf-8")
     if not curves_df.empty:
         curves_df.to_csv(out_dir / "curves.csv", index=False, encoding="utf-8")
     if not budget_df.empty:
@@ -544,4 +610,5 @@ def run_grid(
     (out_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
     )
-    return {"runs": runs, "curves": curves_df, "budget": budget_df, "failures": fail_df}
+    return {"runs": runs, "curves": curves_df, "budget": budget_df, "failures": fail_df,
+            "events": events_df}

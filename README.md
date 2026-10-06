@@ -330,6 +330,27 @@ python scripts/run_benchmark.py --config configs/smoke.yaml \
 python scripts/make_figures.py --config configs/ft_aed_core.yaml
 ```
 
+Если нужен только отчёт текущим кодом (например, после изменения блокировок
+выводов), а датасетов и score нет, — `scripts/rebuild_report.py` читает
+`runs.csv`, `curves.csv`, `manifest.json` и `experiment_config.json` каталога
+прогона и пишет RESULTS.md с фигурами 01, 02, 04–07, 09 в другой каталог:
+
+```bash
+python scripts/rebuild_report.py --run-dir reports/ft_aed_cv --out reports/ft_aed_cv_v1_rebuilt
+```
+
+Диагностика протокола готового прогона — единицы бюджета тревог (окна и
+эпизоды), полоса случайного контроля, безмодельные score, псевдорепликация
+сидов, сравнение с референсом по событиям — считается по сохранённым score
+без обучения и пишет `DIAGNOSTICS.md` с CSV. Если `scores/` нет, флаг
+`--recompute-nontrainable` пересчитывает небучаемые клетки, а клетки
+обучаемых моделей перечисляются в отчёте как недостающие:
+
+```bash
+python scripts/diagnose_run.py --config configs/ft_aed_cv.yaml \
+       --run-dir reports/ft_aed_cv --out reports/ft_aed_cv_v1_rebuilt --tz-reference
+```
+
 ### Кросс-валидация по дням
 
 При одиночном holdout в тесте остаётся 18 событий из 63, и event-recall
@@ -422,6 +443,8 @@ src/stad/
 scripts/
   run_benchmark.py       запуск прогона
   make_figures.py        пересборка фигур без обучения
+  rebuild_report.py      пересборка RESULTS.md из таблиц готового прогона (без score)
+  diagnose_run.py        диагностика протокола готового прогона (DIAGNOSTICS.md, без обучения)
   download_data.py       получение FT-AED и проверка схемы
 
 tests/                   метрики, модели, данные
@@ -435,6 +458,8 @@ reports/<прогон>/
   RESULTS.md             итоговый отчёт
   runs.csv               строка на «конфигурация × сид × датасет»
   curves.csv             операционные кривые
+  events.csv             строка на событие теста клетки: найдено, задержка, кредит padf
+                         (статистика по событиям, ТЗ v2, задачи 1.2 и 2.4)
   budget.csv             подбор размера под бюджет параметров
   manifest.json          штамп окружения, сиды, настройки
   figures/               PNG + PDF

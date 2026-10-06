@@ -433,10 +433,14 @@ def fig_pareto(
     сравниваются все пары цветов, и только три слота палитры проходят
     проверку на разделимость при дальтонизме во всех парах.
     """
+    # n_timed < n_runs — у части клеток (возобновлённых из старых чекпойнтов)
+    # времени нет, и стоимость усреднена не по всем клеткам: точка помечается «*»
     sub = runs.groupby(["label", "group"], as_index=False).agg(
-        q=(metric, "mean"), c=(cost, "mean"), params=("n_params", "mean")
+        q=(metric, "mean"), c=(cost, "mean"), params=("n_params", "mean"),
+        n_timed=(cost, "count"), n_runs=(metric, "size"),
     )
     sub = sub[np.isfinite(sub["c"]) & (sub["c"] > 0)]
+    partial = sub["n_timed"] < sub["n_runs"]
     if sub.empty:
         return []
 
@@ -481,7 +485,8 @@ def fig_pareto(
             if abs(np.log10(max(r["c"], 1e-12)) - px) < 0.35 and abs(r["q"] - pq) < 0.08 * span:
                 dy = -16 if dy > 0 else 14
         ax.annotate(
-            wrap([r["label"]], 22)[0], (r["c"], r["q"]), textcoords="offset points",
+            wrap([str(r["label"]) + ("*" if r["n_timed"] < r["n_runs"] else "")], 22)[0],
+            (r["c"], r["q"]), textcoords="offset points",
             xytext=(10 if right else -10, dy), fontsize=7.5, color=INK_SECONDARY,
             ha="left" if right else "right",
             va="bottom" if dy > 0 else "top",
@@ -493,7 +498,10 @@ def fig_pareto(
     ax.set_title("Качество против стоимости вывода")
     # легенда в середине слева: там единственная устойчиво пустая область
     ax.legend(loc="center left", fontsize=8)
-    annotate_source(fig, "Размер точки — число параметров. Фронт Парето: что нельзя улучшить, не заплатив временем.")
+    annotate_source(
+        fig, "Размер точки — число параметров. Фронт Парето: что нельзя улучшить, не заплатив временем."
+        + ("\n* — время усреднено не по всем клеткам (n_timed в CSV)." if partial.any() else "")
+    )
     return save(fig, out_dir, "fig07_pareto", table=sub, tables_dir=tables_dir)
 
 

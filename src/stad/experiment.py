@@ -227,9 +227,14 @@ def make_figures(
     cfg: ExperimentConfig,
     runs: pd.DataFrame,
     curves: pd.DataFrame,
-    datasets: dict[str, SplitData],
+    datasets: dict[str, SplitData] | None,
 ) -> list[str]:
-    """Построить все фигуры отчёта. Возвращает имена файлов PNG."""
+    """Построить все фигуры отчёта. Возвращает имена файлов PNG.
+
+    ``datasets=None`` — пересборка только по ``runs.csv`` и ``curves.csv``
+    (``scripts/rebuild_report.py``): фигуры 03 (PR-кривые) и 08 (разбор
+    события) требуют данных и сырых score и пропускаются.
+    """
     apply_theme()
     out = Path(cfg.out_dir)
     fig_dir, tbl_dir = out / "figures", out / "tables"
@@ -258,11 +263,13 @@ def make_figures(
             working_point=cfg.alarm_budget_per_hour,
         ))
 
-    ds_name = next(iter(datasets))
+    ds_name = next(iter(datasets)) if datasets else None
     seed = cfg.seeds[0]
-    pr = _pr_data(runs, datasets[ds_name], scores_dir, ds_name, seed, reduce=cfg.node_reduce)
-    if pr:
-        collect(fig_pr_curves(pr, datasets[ds_name].prevalence, out_dir=fig_dir, tables_dir=tbl_dir))
+    if ds_name is not None:
+        pr = _pr_data(runs, datasets[ds_name], scores_dir, ds_name, seed, reduce=cfg.node_reduce)
+        if pr:
+            collect(fig_pr_curves(pr, datasets[ds_name].prevalence, out_dir=fig_dir,
+                                  tables_dir=tbl_dir))
 
     collect(fig_encoder_head_heatmap(
         runs, metric=metric, out_dir=fig_dir, tables_dir=tbl_dir,
@@ -272,12 +279,13 @@ def make_figures(
     collect(fig_seed_variance(runs, metric=metric, out_dir=fig_dir, tables_dir=tbl_dir))
     collect(fig_pareto(runs, metric=metric, out_dir=fig_dir, tables_dir=tbl_dir))
 
-    traces = _event_traces(runs, datasets[ds_name], scores_dir, ds_name, seed,
-                           alarm_budget=cfg.alarm_budget_per_hour,
-                           step_min=float(datasets[ds_name].meta.get('step_min', 0.5)),
-                           persistence=cfg.persistence, reduce=cfg.node_reduce)
-    if not traces.empty:
-        collect(fig_event_timeline(traces, out_dir=fig_dir, tables_dir=tbl_dir))
+    if ds_name is not None:
+        traces = _event_traces(runs, datasets[ds_name], scores_dir, ds_name, seed,
+                               alarm_budget=cfg.alarm_budget_per_hour,
+                               step_min=float(datasets[ds_name].meta.get('step_min', 0.5)),
+                               persistence=cfg.persistence, reduce=cfg.node_reduce)
+        if not traces.empty:
+            collect(fig_event_timeline(traces, out_dir=fig_dir, tables_dir=tbl_dir))
 
     collect(fig_spatial_prior_contribution(runs, metric=metric, out_dir=fig_dir, tables_dir=tbl_dir))
     return produced
